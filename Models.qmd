@@ -1,0 +1,754 @@
+---
+title: "Gender dynamics experiments"
+params:
+  experiment: 1
+  subset_name: "Sop_features_non_cat"
+author: "Eduardo García-Portugués, Carlos Vaquero"
+date: '`r Sys.Date()`'
+format:
+  pdf:
+    latex_engine: xelatex
+    number_sections: yes
+    keep-tex: false
+fontsize: 10pt
+urlcolor: blue
+editor_options:
+  chunk_output_type: console
+---
+
+```{=html}
+<!--
+
+# To reproduce experiments, run ./experiments.sh or execute the following block in R
+exps <- 1:3
+subsets <- c(
+  "Sop_features_non_cat"
+)
+for (exp in exps) {
+  for (s in subsets) {
+    message("Rendering for experiment: ", exp, " and subset: ", s)
+    quarto::quarto_render(
+      input = "Models.qmd",
+      execute_params = list(experiment = exp, subset_name = s),
+      output_file = paste0("Experiment_", exp,"_", s, ".pdf")
+    )
+  }
+}
+
+--->
+```
+
+```{r setup-params}
+#| echo: false
+# Report parameters
+subset_name <- params$subset_name
+experiment <- params$experiment
+message("Running experiment ", experiment, " with subset ", subset_name)
+```
+
+# Load libraries
+
+```{r, libraries}
+#| message: false
+# Load libraries
+library(knitr)
+library(dplyr)
+library(recipes)
+library(rsample)
+library(yardstick)
+library(glmnet)
+library(ggplot2)
+library(caret)
+library(tibble)
+sessionInfo()
+```
+
+```{r, functions}
+#| include: false
+#| cache: false
+knitr::opts_chunk$set(
+  echo = TRUE, cache = FALSE, warning = FALSE, message = FALSE,
+  fig.path = paste0("Models_files/Experiment_", params$experiment, "_",
+                    params$subset_name, "/")
+)
+
+# Compute AUC
+auc_binary <- function(y, p_hat) {
+
+  roc_auc_vec(
+    truth = y,
+    estimate = drop(p_hat),
+    event_level = "second"
+  )
+
+}
+
+# CIs for logistic ridge estimation
+logistic_ridge_ci <- function(X, y, beta_hat, lambda, level = 0.95) {
+
+  # X: design matrix (n x p)
+  # y: binary response (0/1)
+  # beta_hat: vector of coefficients (length p + 1)
+  # lambda: penalty parameter in "theory" scale: (X'X + 2 * lambda * I)
+  #         If the input of lambda is that from glmnet, then set
+  #         lambda = n * lambda_glmnet / 2
+  # level: confidence level, default 0.95
+
+  # Variables
+  n <- nrow(X)
+  p <- ncol(X)
+
+  # V_hat matrix
+  eta_hat <- drop(beta_hat[1] + X %*% beta_hat[-1])
+  p_hat <- 1 / (1 + exp(-eta_hat))
+  V_hat <- diag(p_hat * (1 - p_hat), nrow = n, ncol = n)
+
+  # Asymptotic covariance from Le Cessie & Van Houwelingen (1992, p. 194)
+  # https://www.jstor.org/stable/2347628?seq=4
+  # Recall the 2 * lambda in the ridge penalty
+  XtWX <- t(X) %*% V_hat %*% X
+  XtWX_lambda_inv <- solve(XtWX + diag(2 * lambda, nrow = p, ncol = p))
+  asymp_var <- XtWX_lambda_inv %*% XtWX %*% XtWX_lambda_inv
+
+  # Standard errors and z-based CIs
+  se <- sqrt(diag(asymp_var))
+  zcrit <- qnorm(1 - (1 - level) / 2)
+  ci_low <- beta_hat[-1] - zcrit * se
+  ci_up <- beta_hat[-1] + zcrit * se
+
+  # Return a tibble
+  tibble(
+    term = colnames(X) %||% paste0("x", seq_len(p)),
+    estimate = beta_hat[-1],
+    std_error = se,
+    ci_low = ci_low,
+    ci_up = ci_up,
+    z_value = estimate / std_error,
+    p_value = 2 * pnorm(-abs(z_value))
+  )
+
+}
+
+# Extract features according to the types of subsets defined
+get_features_subsets_voice <- function(df_total) {
+
+  # 1. Drop unwanted columns by regex
+  df_total <- df_total |>
+    select(-matches("_win_|js_.*|m21.*|SoundSop|Count|Sum|Notes|SoundingMeasures|SopI|SopII|SopIII|PartSop_Syllables"),
+           -matches("^PartSop_HighestNote($|_[A-Za-z0-9]+)"),
+           -matches("^PartSop_LowestNote($|_[A-Za-z0-9]+)"))
+
+  # 2. Keep only Sop* features (no target)
+  df_total <- df_total |>
+    select(matches("^Sop|^PartSop")) |>
+    # remove only columns like PartSop_HighestNote_G5 and PartSop_LowestNote_C4
+    select(-matches("^PartSop_HighestNote_.+|^PartSop_LowestNote_.+"))
+
+  # 3. Feature subset definitions
+  features_subsets <- list(
+    Melody = df_total |>
+      select(matches("Amb|Density|Trimmed|Semitones|AbsoluteIntervallic|AscendingIntervals|AscendingIntervallic|StepwiseMotionDesc|PartSop_LowestNoteIndex|PartSop_HighestNoteIndex")) |>
+      select(-matches("PartSop_RhythmInt")),
+
+    Melody_extended = df_total |>
+      select(matches("PartSop_Degree|IntervalA|IntervalM|IntervalP|Intervald|Intervalm|Amb|Density|Trimmed|Semitones|AbsoluteIntervallic|AscendingIntervals|AscendingIntervallic|StepwiseMotionDesc|PartSop_LowestNoteIndex|PartSop_HighestNoteIndex")) |>
+      select(-matches("PartSop_RhythmInt")),
+
+    Rhythm = df_total |>
+      select(matches("DottedRhythm|AverageDuration|DoubleDottedRhythm|RhythmInt")),
+
+    Lyrics = df_total |>
+      select(matches("VoicePresence|SyllabicRatio")),
+
+    All_sop_features = df_total |>
+      select(matches("PartSop"))
+  )
+
+  # 4. Non-categorical version
+  cols_to_drop <- features_subsets$All_sop_features |>
+    select(matches("PartSop_Degree|PartSop_IntervalM|PartSop_IntervalP|PartSop_Intervald|PartSop_Intervalm|PartSop_LargestIntervalDesc_|PartSop_Interval*_Per|PartSop_MeanInterval|PartSop_SmallestIntervalAsc|PartSop_LargestIntervalDesc|PartSop_IntervalA.2_Per|PartSop_IntervalA.4_Per|PartSop_IntervalA.5_Per|PartSop_IntervalA1_Per|PartSop_IntervalA11_Per|PartSop_IntervalA2_Per|PartSop_IntervalA3_Per|PartSop_IntervalA4_Per|PartSop_IntervalA5_Per|PartSop_IntervalA6_Per|PartSop_IntervalA8_Per")) |>
+    names()
+
+  # Features subset
+  features_subsets$Sop_features_non_cat <-
+    features_subsets$All_sop_features |> select(-all_of(cols_to_drop))
+  return(features_subsets)
+
+}
+
+# Compute F1 score function
+f1 <- function(y, y_hat, average = c("macro", "weighted")) {
+
+  # Ensure same factor levels
+  y <- factor(y)
+  y_hat <- factor(y_hat, levels = levels(y))
+  classes <- levels(y)
+  n <- length(y)
+  f1_per_class <- numeric(length(classes))
+  weights <- numeric(length(classes))
+
+  # Compute F1 score for each class
+  for (i in seq_along(classes)) {
+
+    cls <- classes[i]
+    tp <- sum(y_hat == cls & y == cls)
+    fp <- sum(y_hat == cls & y != cls)
+    fn <- sum(y_hat != cls & y == cls)
+    precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+    recall <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+    f1 <- ifelse(precision + recall == 0,
+                 0,
+                 2 * precision * recall / (precision + recall))
+    f1_per_class[i] <- f1
+    weights[i] <- sum(y == cls) / n
+
+  }
+
+  # Aggregation of F1 scores
+  average <- match.arg(average)
+  if (average == "macro") {
+
+    return(mean(f1_per_class))
+
+  } else {
+
+    return(sum(weights * f1_per_class))
+
+  }
+
+}
+
+# Bootstrap accuracy
+boot_acc <- function(true_labels, pred_labels, n_boot = 1000, seed = 123) {
+
+  set.seed(seed) # It is key to ensure the same bootstrap samples are used
+  # for different applications of the function for different models
+  n <- length(true_labels)
+  acc <- numeric(n_boot)
+  for (i in seq_len(n_boot)) {
+
+    indices <- sample(1:n, size = n, replace = TRUE)
+    acc[i] <- mean(true_labels[indices] == pred_labels[indices])
+
+  }
+  return(acc)
+
+}
+```
+
+# Read datasets
+
+```{r, read-data}
+# Load csv
+df <- read.csv(paste0("Experiment_", experiment, ".csv"),
+               stringsAsFactors = TRUE)
+
+# Choose target column based on experiment
+target_col <- case_when(
+  experiment %in% c(1, 2) ~ "Gender",
+  experiment == 3 ~ "Singer_Sex"
+)
+
+# Rename target to 'y'
+df <- df |>
+  rename(y = !!target_col)
+
+# Number of observations per group
+df |>
+  group_by(y) |>
+  summarise(n = n(), .groups = "drop")
+
+# Split into train / test (85% / 15%)
+set.seed(123)
+split_obj <- initial_split(df, prop = 0.85)
+train <- training(split_obj)
+test <- testing(split_obj)
+```
+
+```{r, recipes-subset}
+# Determine subset based ONLY on training data
+features_list_train <- get_features_subsets_voice(train)
+if (!(subset_name %in% names(features_list_train))) {
+  stop("Subset ", subset_name, " not found")
+}
+
+# Select features based on subset name
+selected_features <- colnames(features_list_train[[subset_name]])
+train <- train |>
+  select(all_of(selected_features), y)
+test <- test |>
+  select(all_of(selected_features), y)
+dim(train)
+dim(test)
+
+# Combined dataset for recipes
+combined <- bind_rows(train, test)
+```
+
+# Preprocessing recipes
+
+```{r, recipes}
+# Preprocessing recipe
+preprocess_recipe <- function(data) {
+  recipe(y ~ ., data = data) |>
+    # Preprocess all predictors BEFORE dummying
+    step_zv(all_predictors()) |>
+    step_nzv(all_predictors()) |>
+    step_filter_missing(all_predictors(), threshold = 0.05) |>
+    step_impute_knn(all_predictors(), neighbors = 5) |>
+    # Collapse rare factor levels (BEFORE dummy creation)
+    step_other(all_nominal_predictors(), threshold = 0.10) |>
+    # Preprocess numeric predictors only
+    step_corr(all_numeric_predictors(), threshold = 0.80) |>
+    step_lincomb(all_numeric_predictors(), max_steps = 20) |>
+    step_normalize(all_numeric_predictors()) |>
+    # Create dummy variables (AFTER normalization)
+    # Use one-hot encoding such that no dummy variable is dropped and we can
+    # later drop the "other" level manually (so it becomes the reference level
+    # and we avoid hard-to-explain dummies in the final model)
+    # step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+    step_dummy(all_nominal_predictors(), one_hot = FALSE) |>
+    # Drop the dummies for the "other" level
+    step_rm(ends_with("_other")) |>
+    # Post-dummy cleanup
+    step_zv(all_predictors()) |>
+    step_nzv(all_predictors()) |>
+    step_lincomb(all_predictors(), max_steps = 20)
+}
+```
+
+```{r, recipes-bake}
+# Train recipe using train data
+rec_train <- preprocess_recipe(data = train)
+prep_rec_train <- prep(rec_train)
+
+# Bake train data
+train_bake <- bake(prep_rec_train, new_data = NULL)
+test_train_bake <- bake(prep_rec_train, new_data = test)
+
+# Train recipe using combined data (train + test)
+rec_all <- preprocess_recipe(data = combined)
+prep_all <- prep(rec_all)
+
+# Fully baked dataset for the final model fit
+all_bake <- bake(prep_all, new_data = NULL)
+
+# Export datasets for future reference and use
+dir.create("preprocessed_datasets", showWarnings = FALSE)
+write.csv(train_bake, paste0("preprocessed_datasets/train_bake_exp", experiment,
+                             "_sub_", subset_name, ".csv"),
+          row.names = FALSE)
+write.csv(test_train_bake, paste0("preprocessed_datasets/test_train_bake_exp",
+                                  experiment, "_sub_", subset_name, ".csv"),
+          row.names = FALSE)
+write.csv(all_bake, paste0("preprocessed_datasets/all_bake_", experiment,
+                           "_sub_", subset_name, ".csv"),
+          row.names = FALSE)
+```
+
+# Lasso logistic
+
+## Fitting
+
+```{r, log1-fit}
+# Fit by 10-fold cross-validation
+set.seed(42)
+train_bake_no_y <- train_bake |>
+  select(-y) |>
+  as.matrix()
+cv1_train <- cv.glmnet(x = train_bake_no_y, y = train_bake$y,
+                       family = "binomial", alpha = 1, nfolds = 10)
+plot(cv1_train)
+```
+
+## Predictions
+
+```{r, log1-pred}
+# Predictions
+test_train_bake_no_y <- test_train_bake |>
+  select(-y) |>
+  as.matrix()
+y_test_hat_LL <- predict(cv1_train, newx = test_train_bake_no_y,
+                         s = "lambda.1se", type = "class")
+p_test_hat_LL <- predict(cv1_train, newx = test_train_bake_no_y,
+                         s = "lambda.1se", type = "response")
+```
+
+## Metrics
+
+```{r, log1-metrics}
+# Metrics
+acc_LL <- mean(test$y == y_test_hat_LL)
+auc_LL <- auc_binary(test$y, p_test_hat_LL)
+f1_LL <- f1(test$y, y_test_hat_LL)
+data.frame("Accuracy" = acc_LL, "AUC" = auc_LL, "Macro_F1" = f1_LL) |>
+  kable(digits = 4)
+```
+
+## Relevant coefficients
+
+```{r, log1-coefs}
+# Extract nonzero coefficients for lambda.1se and order them by absolute value
+coefs1_train <- predict(cv1_train, s = "lambda.1se", type = "coefficients") |>
+  as.matrix() |>
+  as.data.frame() |>
+  rownames_to_column(var = "feature") |>
+  rename("coefficient" = "lambda.1se")
+coefs1_train |>
+  filter(coefficient != 0) |>
+  arrange(desc(abs(coefficient))) |>
+  kable(digits = 4)
+```
+
+# Ridge logistic model
+
+## Fitting
+
+```{r, log0-fit}
+# Fit by 10-fold cross-validation
+set.seed(42)
+cv0_train <- cv.glmnet(x = train_bake_no_y, y = train_bake$y,
+                       family = "binomial", alpha = 0, nfolds = 10)
+plot(cv0_train)
+```
+
+## Predictions
+
+```{r, log0-pred}
+# Predictions
+y_test_hat_RL <- predict(cv0_train, newx = test_train_bake_no_y,
+                         s = "lambda.1se", type = "class")
+p_test_hat_RL <- predict(cv0_train, newx = test_train_bake_no_y,
+                         s = "lambda.1se", type = "response")
+```
+
+## Metrics
+
+```{r, log0-metrics}
+# Metrics
+acc_RL <- mean(test$y == y_test_hat_RL)
+auc_RL <- auc_binary(test$y, p_test_hat_RL)
+f1_RL <- f1(test$y, y_test_hat_RL)
+data.frame("Accuracy" = acc_RL, "AUC" = auc_RL, "Macro_F1" = f1_RL) |>
+  kable(digits = 4)
+```
+
+## Relevant coefficients
+
+```{r, log0-coefs}
+# Extract coefficients and sort them by absolute value
+coefs0_train <- predict(cv0_train, s = "lambda.1se", type = "coefficients") |>
+  as.matrix() |>
+  as.data.frame() |>
+  rownames_to_column(var = "feature") |>
+  rename("coefficient" = "lambda.1se")
+coefs0_train |>
+  filter(coefficient != 0) |>
+  arrange(desc(abs(coefficient))) |>
+  head(30) |>
+  kable(digits = 4)
+```
+
+# Random forests
+
+## Fitting
+
+```{r, rf-fit}
+#| message: false
+# Set seeds for reproducibility in caret with RF
+set.seed(42)
+n_folds <- 10
+n_tune <- 5
+rf_seeds <- c(
+  lapply(seq_len(n_folds), function(i) rep(i, n_tune)),
+  list(999L)
+)
+
+# Define 10-fold CV
+cv_ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE,
+                        summaryFunction = twoClassSummary,
+                        savePredictions = "final", seeds = rf_seeds)
+
+# Train Random Forest with tuning of mtry optimizing AUC
+rf_train <- train(x = train_bake_no_y, y = train_bake$y, method = "rf",
+                  metric = "ROC", trControl = cv_ctrl, tuneLength = n_tune)
+plot(rf_train)
+```
+
+## Predictions
+
+```{r, rf-pred}
+# Predictions
+y_test_hat_RF <- predict(rf_train, newdata = test_train_bake_no_y)
+positive_class <- levels(train_bake$y)[2] # "Class 1" is the second factor level
+p_test_hat_RF <- predict(rf_train, newdata = test_train_bake_no_y,
+                         type = "prob")[, positive_class]
+```
+
+## Metrics
+
+```{r, rf-metrics}
+# Metrics
+acc_RF <- mean(test_train_bake$y == y_test_hat_RF)
+auc_RF <- auc_binary(test$y, p_test_hat_RF)
+f1_RF <- f1(test$y, y_test_hat_RF)
+data.frame("Accuracy" = acc_RF, "AUC" = auc_RF, "Macro_F1" = f1_RF) |>
+  kable(digits = 4)
+```
+
+## Variables importance
+
+```{r, rf-vars}
+# Variables importance
+rf_importance <- varImp(rf_train)$importance
+rf_importance |>
+  rownames_to_column("feature") |>
+  arrange(desc(Overall)) |>
+  head(30) |>
+  kable(digits = 4)
+```
+
+# Metrics for all models on test data
+
+```{r, save-predictions}
+# Save predictions for all models
+dir.create("results/y_hats", showWarnings = FALSE)
+datasets_to_save <- list(
+  RL = y_test_hat_RL,
+  LL = y_test_hat_LL,
+  RF = y_test_hat_RF,
+  y_true = test$y
+)
+for (name in names(datasets_to_save)) {
+
+  data_to_write <- datasets_to_save[[name]]
+
+  # If it's a vector, convert to data frame
+  if (is.vector(data_to_write)) {
+    data_to_write <- data.frame(prediction = data_to_write)
+  }
+
+  # Construct filename
+  file_name <- paste0("results/y_hats/", name, "_", experiment,
+                      "_sub_", subset_name, ".csv")
+
+  # Write CSV
+  write.csv(data_to_write, file_name, row.names = FALSE)
+
+}
+```
+
+```{r, all-metrics}
+# Combine all metrics into a single table
+metrics_table <- data.frame(
+  Accuracy = c(acc_RL, acc_LL, acc_RF),
+  AUC = c(auc_RL, auc_LL, auc_RF),
+  Macro_F1 = c(f1_RL, f1_LL, f1_RF),
+  Model = c("Ridge Logistic (RL)", "Lasso Logistic (LL)",
+            "Random Forest (RF)")
+)
+metrics_table |>
+  kable(digits = 4)
+```
+
+# Bootstrap tests for model comparison
+
+```{r, boot}
+# Run bootstrapping of accuracy with predictions
+B <- 10000
+boot_RL <- boot_acc(test$y, y_test_hat_RL, n_boot = B, seed = 123)
+boot_LL <- boot_acc(test$y, y_test_hat_LL, n_boot = B, seed = 123)
+boot_RF <- boot_acc(test$y, y_test_hat_RF, n_boot = B, seed = 123)
+boot <- list(RL = boot_RL, LL = boot_LL, RF = boot_RF)
+
+# Bootstrap accuracy differences between RF and other models
+diff_boot_RF_RL <- boot$RF - boot$RL
+diff_boot_RF_LL <- boot$RF - boot$LL
+
+# One-sided p-values (H1: RF better than other model)
+p_RF_vs_RL <- (1 + sum(diff_boot_RF_RL <= 0)) / (B + 1)
+p_RF_vs_LL <- (1 + sum(diff_boot_RF_LL <= 0)) / (B + 1)
+
+# Two-sided 95% confidence intervals for differences
+ci_diff_RL <- quantile(diff_boot_RF_RL, probs = c(0.025, 0.975))
+ci_diff_LL <- quantile(diff_boot_RF_LL, probs = c(0.025, 0.975))
+
+# Add bootstrap tests to metrics table
+metrics_table <- metrics_table |>
+  mutate(
+    ci_diff_lo = c(ci_diff_RL[1], ci_diff_LL[1], NA),
+    ci_diff_up = c(ci_diff_RL[2], ci_diff_LL[2], NA),
+    pval_better = c(p_RF_vs_RL, p_RF_vs_LL, NA)
+  )
+metrics_table |>
+  kable(digits = 4)
+```
+
+# Comparison with majority class baseline
+
+```{r, mc-baseline}
+# Majority Class (MC) prediction baseline - always predict most common class
+class_probs <- table(train$y) / length(train$y)
+majority_class_train <- names(sort(class_probs, decreasing = TRUE))[1]
+y_test_hat_MC <- factor(rep(majority_class_train, length(test$y)),
+                        levels = levels(test$y))
+
+# Metrics for majority class baseline
+acc_MC <- mean(test$y == y_test_hat_MC)
+p_test_hat_MC <- rep(class_probs[majority_class_train], length(test$y))
+auc_MC <- auc_binary(test$y, p_test_hat_MC)
+f1_MC <- f1(test$y, y_test_hat_MC)
+
+# Bootstrap accuracy for majority class baseline
+boot_MC <- boot_acc(test$y, y_test_hat_MC, n_boot = B, seed = 123)
+
+# Bootstrap accuracy differences between majority class baseline and models
+diff_boot_RL_MC <- boot_RL - boot_MC
+diff_boot_LL_MC <- boot_LL - boot_MC
+diff_boot_RF_MC <- boot_RF - boot_MC
+
+# One-sided p-values (H1: model better than majority class baseline)
+p_RL_vs_MC <- (1 + sum(diff_boot_RL_MC <= 0)) / (B + 1)
+p_LL_vs_MC <- (1 + sum(diff_boot_LL_MC <= 0)) / (B + 1)
+p_RF_vs_MC <- (1 + sum(diff_boot_RF_MC <= 0)) / (B + 1)
+
+# Two-sided 95% confidence intervals for differences
+ci_diff_RL_MC <- quantile(diff_boot_RL_MC, probs = c(0.025, 0.975))
+ci_diff_LL_MC <- quantile(diff_boot_LL_MC, probs = c(0.025, 0.975))
+ci_diff_RF_MC <- quantile(diff_boot_RF_MC, probs = c(0.025, 0.975))
+
+# Combine all metrics into a single table
+metrics_table_MC <- data.frame(
+  Accuracy = c(acc_RL, acc_LL, acc_RF, acc_MC),
+  AUC = c(auc_RL, auc_LL, auc_RF, auc_MC),
+  Macro_F1 = c(f1_RL, f1_LL, f1_RF, f1_MC),
+  ci_diff_lo = c(ci_diff_RL_MC[1], ci_diff_LL_MC[1], ci_diff_RF_MC[1], NA),
+  ci_diff_up = c(ci_diff_RL_MC[2], ci_diff_LL_MC[2], ci_diff_RF_MC[2], NA),
+  pval_better = c(p_RL_vs_MC, p_LL_vs_MC, p_RF_vs_MC, NA),
+  Model = c("Ridge Logistic (RL)", "Lasso Logistic (LL)",
+            "Random Forest (RF)", "Majority Class (MC)")
+)
+metrics_table_MC |>
+  kable(digits = 4)
+
+# In a combined table
+metrics_table_combined <- metrics_table_MC |>
+  mutate(ci_diff_lo_MC = ci_diff_lo, ci_diff_up_MC = ci_diff_up,
+         pval_better_MC = pval_better) |>
+  mutate(ci_diff_lo_RF = c(metrics_table$ci_diff_lo, NA),
+         ci_diff_up_RF = c(metrics_table$ci_diff_up, NA),
+         pval_better_RF = c(metrics_table$pval_better, NA)) |>
+  select(Model, Accuracy, AUC, Macro_F1,
+         ci_diff_lo_RF, ci_diff_up_RF, pval_better_RF,
+         ci_diff_lo_MC, ci_diff_up_MC, pval_better_MC)
+metrics_table_combined |>
+  kable(digits = 4)
+
+# Save table of all metrics + bootstrap tests
+dir.create("results/experiments", showWarnings = FALSE)
+write.csv(metrics_table_combined, paste0("results/experiments/all_results_",
+                                         "Experiment_", experiment,
+                                         "_sub_", subset_name, ".csv"),
+          row.names = FALSE)
+```
+
+\scriptsize
+
+```{r, latex-table}
+# Print LaTeX table
+latex_table <- metrics_table_combined |>
+  mutate(ci_RF = paste0("$(", sprintf("%.4f", ci_diff_lo_RF), ", ",
+                        sprintf("%.4f", ci_diff_up_RF), ")$"),
+         ci_MC = paste0("$(", sprintf("%.4f", ci_diff_lo_MC), ", ",
+                        sprintf("%.4f", ci_diff_up_MC), ")$"),
+         p_RF = sprintf("%.4f", pval_better_RF),
+         p_MC = sprintf("%.4f", pval_better_MC)) |>
+  select(Model, Accuracy, AUC, Macro_F1, ci_RF, p_RF, ci_MC, p_MC)
+latex_table |>
+  kable(digits = 4)
+latex_table |>
+  kable(digits = 4, format = "latex", booktabs = TRUE, escape = FALSE) |>
+  print()
+```
+
+\normalsize
+
+# Ridge logistic for inference and final model on all data (train + test)
+
+```{r, ridge-inf-fit}
+# Fit ridge
+set.seed(42)
+all_bake_no_y <- all_bake |>
+  select(-y) |>
+  as.matrix()
+cv0_all <- cv.glmnet(x = all_bake_no_y, y = all_bake$y, family = "binomial",
+                     alpha = 0, nfolds = 10)
+plot(cv0_all)
+cv0_all
+```
+
+```{r, ridge-inf-coefs}
+#| out.width: '100%'
+#| fig.width: 10
+#| fig.height: 10
+# Confidence intervals for all coefficients
+ci_df <- logistic_ridge_ci(X = all_bake_no_y, y = all_bake$y,
+                           beta_hat = coef(cv0_all, s = cv0_all$lambda.1se),
+                           lambda = nrow(all_bake) * cv0_all$lambda.1se / 2)
+
+# Filter significant coefficients and order by effect size
+ci_df <- ci_df |>
+  filter(sign(ci_low * ci_up) > 0) |>
+  mutate(
+    pct_change = (exp(estimate) - 1) * 100,
+    pct_low = (exp(ci_low) - 1) * 100,
+    pct_up = (exp(ci_up) - 1) * 100
+  ) |>
+  mutate(
+    term = factor(term, levels = term[order(pct_change, decreasing = FALSE)]
+    )
+  )
+ci_df |>
+  select(term, pct_change, pct_low, pct_up, p_value) |>
+  arrange(desc(pct_change)) |>
+  kable(digits = 2)
+
+# Plot of coefficients in odds
+plot_RL <- ggplot(ci_df, aes(x = term, y = pct_change,
+                             ymin = pct_low, ymax = pct_up)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Percent change in odds (per 1-unit SD increase in numerical\npredictor or presence of categorical predictor)"
+  ) +
+  theme_bw()
+plot_RL
+
+# Save plot
+plot_name <- paste0("plots/plot_rl", "_", experiment,
+                    "_sub_", subset_name, ".png")
+ggsave(filename = plot_name, plot = plot_RL, width = 8, height = 6, dpi = 300)
+
+# Metrics on all data available, just for reference
+y_all_hat_RL <- predict(cv0_all, newx = all_bake_no_y, s = "lambda.1se",
+                        type = "class")
+p_all_hat_RL <- predict(cv0_all, newx = all_bake_no_y, s = "lambda.1se",
+                        type = "response")
+acc_all_RL <- mean(all_bake$y == y_all_hat_RL)
+auc_all_RL <- auc_binary(all_bake$y, p_all_hat_RL)
+f1_all_RL <- f1(all_bake$y, y_all_hat_RL)
+glmnet_summary <- data.frame("Accuracy" = acc_all_RL, "AUC" = auc_all_RL,
+                             "Macro_F1" = f1_all_RL,
+                             "Model" = "Ridge Logistic (RL)")
+glmnet_summary |>
+  kable(digits = 4)
+
+# Save results
+dir.create("results/final_model", showWarnings = FALSE)
+write.csv(glmnet_summary, paste0("results/final_model/RL_final_model_results",
+                                 "_Experiment_", experiment, "_sub_",
+                                 subset_name, ".csv"),
+          row.names = FALSE)
+```

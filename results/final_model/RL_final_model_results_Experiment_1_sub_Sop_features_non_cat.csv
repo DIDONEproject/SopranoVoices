@@ -1,0 +1,2 @@
+"Accuracy","AUC","Macro_F1","Model"
+0.629233511586453,0.700670637671728,0.628240091754811,"Ridge Logistic (RL)"
