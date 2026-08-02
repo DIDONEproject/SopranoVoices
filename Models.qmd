@@ -19,7 +19,10 @@ editor_options:
 ```{=html}
 <!--
 
-# To reproduce experiments, run ./experiments.sh or execute the following block in R
+# This report is rendered once per (experiment, subset) combination.
+# To reproduce all experiments, run ./experiments.sh from the repository root.
+# Alternatively, execute the following block in R:
+
 exps <- 1:3
 subsets <- c(
   "Sop_features_non_cat"
@@ -38,12 +41,19 @@ for (exp in exps) {
 --->
 ```
 
-```{r setup-params}
+```{r, setup-params}
 #| echo: false
 # Report parameters
 subset_name <- params$subset_name
 experiment <- params$experiment
 message("Running experiment ", experiment, " with subset ", subset_name)
+
+# Analysis constants, referenced throughout the report
+n_folds <- 10 # Folds for every cross-validation (glmnet and caret)
+n_tune <- 5 # Grid size for the random forest mtry tuning
+B <- 10000 # Bootstrap replicates for model comparison
+level <- 0.95 # Confidence level for all intervals
+ci_probs <- c((1 - level) / 2, 1 - (1 - level) / 2)
 ```
 
 # Load libraries
@@ -59,6 +69,7 @@ library(yardstick)
 library(glmnet)
 library(ggplot2)
 library(caret)
+library(randomForest)
 library(tibble)
 sessionInfo()
 ```
@@ -72,7 +83,7 @@ knitr::opts_chunk$set(
                     params$subset_name, "/")
 )
 
-# Compute AUC
+# Compute the AUC of a binary classifier.
 auc_binary <- function(y, p_hat) {
 
   roc_auc_vec(
@@ -83,58 +94,120 @@ auc_binary <- function(y, p_hat) {
 
 }
 
-# CIs for logistic ridge estimation
-logistic_ridge_ci <- function(X, y, beta_hat, lambda, level = 0.95) {
+# Confidence intervals for the coefficients of a logistic ridge fit.
+#
+# X: design matrix (n x p), WITHOUT an intercept column (added internally)
+# beta_hat: vector of coefficients (length p + 1), intercept first
+# lambda: penalty parameter in "theory" scale: (X'X + 2 * lambda * I)
+#         If the input of lambda is that from glmnet, then set
+#         lambda = n * lambda_glmnet / 2
+# level: confidence level, default 0.95
+# m: Bonferroni family size for the slope intervals; NULL (default) gives
+#    marginal intervals. The intercept is not a tested hypothesis and always
+#    receives the marginal interval.
+# Value: a tibble with one row per coefficient, intercept first
+#
+# Note: the recipe standardizes every baked column (numerics and dummy
+# indicators alike) to unit sample sd, so glmnet's internal standardization
+# (1 / n variance) rescales all columns by the same sqrt((n - 1) / n) factor
+# and the uniform 2 * lambda penalty below matches glmnet's effective
+# per-column penalty up to that common, asymptotically negligible factor.
+logistic_ridge_ci <- function(X, beta_hat, lambda, level = 0.95, m = NULL) {
 
-  # X: design matrix (n x p)
-  # y: binary response (0/1)
-  # beta_hat: vector of coefficients (length p + 1)
-  # lambda: penalty parameter in "theory" scale: (X'X + 2 * lambda * I)
-  #         If the input of lambda is that from glmnet, then set
-  #         lambda = n * lambda_glmnet / 2
-  # level: confidence level, default 0.95
-
-  # Variables
-  n <- nrow(X)
   p <- ncol(X)
 
-  # V_hat matrix
-  eta_hat <- drop(beta_hat[1] + X %*% beta_hat[-1])
-  p_hat <- 1 / (1 + exp(-eta_hat))
-  V_hat <- diag(p_hat * (1 - p_hat), nrow = n, ncol = n)
+  # Design matrix with intercept column, matching beta_hat
+  X1 <- cbind("(Intercept)" = 1, X)
 
-  # Asymptotic covariance from Le Cessie & Van Houwelingen (1992, p. 194)
-  # https://www.jstor.org/stable/2347628?seq=4
-  # Recall the 2 * lambda in the ridge penalty
-  XtWX <- t(X) %*% V_hat %*% X
-  XtWX_lambda_inv <- solve(XtWX + diag(2 * lambda, nrow = p, ncol = p))
+  # Binomial weights of the Fisher information
+  eta_hat <- drop(X1 %*% beta_hat)
+  p_hat <- 1 / (1 + exp(-eta_hat))
+  w_hat <- p_hat * (1 - p_hat)
+
+  # Asymptotic covariance from Le Cessie & Van Houwelingen (1992, p. 194;
+  # https://www.jstor.org/stable/2347628)
+  # with the 2 * lambda ridge penalty and the intercept unpenalized.
+  # crossprod(X1 * sqrt(w_hat)) avoids the dense n x n weight matrix
+  XtWX <- crossprod(X1 * sqrt(w_hat))
+  pen <- diag(c(0, rep(2 * lambda, p)))
+  XtWX_lambda_inv <- solve(XtWX + pen)
   asymp_var <- XtWX_lambda_inv %*% XtWX %*% XtWX_lambda_inv
 
-  # Standard errors and z-based CIs
+  # z-based CIs; slope intervals Bonferroni-adjusted when m is given
   se <- sqrt(diag(asymp_var))
-  zcrit <- qnorm(1 - (1 - level) / 2)
-  ci_low <- beta_hat[-1] - zcrit * se
-  ci_up <- beta_hat[-1] + zcrit * se
+  alpha <- 1 - level
+  alpha_slopes <- if (is.null(m)) alpha else alpha / m
+  zcrit <- qnorm(1 - c(alpha, rep(alpha_slopes, p)) / 2)
+  est <- as.numeric(beta_hat)
+  ci_low <- est - zcrit * se
+  ci_up <- est + zcrit * se
+
+  # Adjusted p-values are Bonferroni on the slopes, NA for the intercept
+  slope_names <- colnames(X) %||% paste0("x", seq_len(p))
 
   # Return a tibble
   tibble(
-    term = colnames(X) %||% paste0("x", seq_len(p)),
-    estimate = beta_hat[-1],
+    term = c("(Intercept)", slope_names),
+    estimate = est,
     std_error = se,
     ci_low = ci_low,
     ci_up = ci_up,
     z_value = estimate / std_error,
-    p_value = 2 * pnorm(-abs(z_value))
+    p_value = 2 * pnorm(-abs(z_value)),
+    p_value_adj = c(NA, pmin(1, (if (is.null(m)) 1 else m) * p_value[-1]))
   )
 
 }
 
-# Extract features according to the types of subsets defined
+# Collapse a set of regex alternatives into a single pattern
+alt <- function(...) paste(c(...), collapse = "|")
+
+# Windowed, and jSymbolic / music21 columns, plus the non-Soprano parts
+drop_general <- c(
+  "_win_", "js_.*", "m21.*", "SoundSop", "Count", "Sum", "Notes",
+  "SoundingMeasures", "SopI", "SopII", "SopIII", "PartSop_Syllables"
+)
+
+# Melodic contour, range, and interval-size descriptors
+melody_core <- c(
+  "Amb", "Density", "Trimmed", "Semitones", "AbsoluteIntervallic",
+  "AscendingIntervals", "AscendingIntervallic", "StepwiseMotionDesc",
+  "PartSop_LowestNoteIndex", "PartSop_HighestNoteIndex"
+)
+
+# Interval-quality descriptors, added on top of melody_core
+melody_quality <- c(
+  "PartSop_Degree", "IntervalA", "IntervalM", "IntervalP", "Intervald",
+  "Intervalm"
+)
+
+# Rhythmic descriptors
+rhythm_terms <- c(
+  "DottedRhythm", "AverageDuration", "DoubleDottedRhythm", "RhythmInt"
+)
+
+# Text-setting descriptors
+lyrics_terms <- c("VoicePresence", "SyllabicRatio")
+
+# Categorical columns excluded from the non-categorical subset
+categorical_terms <- c(
+  "PartSop_Degree", "PartSop_IntervalM", "PartSop_IntervalP",
+  "PartSop_Intervald", "PartSop_Intervalm", "PartSop_MeanInterval",
+  "PartSop_SmallestIntervalAsc", "PartSop_LargestIntervalDesc",
+  "PartSop_IntervalA.2_Per", "PartSop_IntervalA.4_Per",
+  "PartSop_IntervalA.5_Per", "PartSop_IntervalA1_Per",
+  "PartSop_IntervalA11_Per", "PartSop_IntervalA2_Per",
+  "PartSop_IntervalA3_Per", "PartSop_IntervalA4_Per",
+  "PartSop_IntervalA5_Per", "PartSop_IntervalA6_Per",
+  "PartSop_IntervalA8_Per"
+)
+
+# Extract features according to the types of subsets defined.
 get_features_subsets_voice <- function(df_total) {
 
   # 1. Drop unwanted columns by regex
   df_total <- df_total |>
-    select(-matches("_win_|js_.*|m21.*|SoundSop|Count|Sum|Notes|SoundingMeasures|SopI|SopII|SopIII|PartSop_Syllables"),
+    select(-matches(alt(drop_general)),
            -matches("^PartSop_HighestNote($|_[A-Za-z0-9]+)"),
            -matches("^PartSop_LowestNote($|_[A-Za-z0-9]+)"))
 
@@ -147,18 +220,18 @@ get_features_subsets_voice <- function(df_total) {
   # 3. Feature subset definitions
   features_subsets <- list(
     Melody = df_total |>
-      select(matches("Amb|Density|Trimmed|Semitones|AbsoluteIntervallic|AscendingIntervals|AscendingIntervallic|StepwiseMotionDesc|PartSop_LowestNoteIndex|PartSop_HighestNoteIndex")) |>
+      select(matches(alt(melody_core))) |>
       select(-matches("PartSop_RhythmInt")),
 
     Melody_extended = df_total |>
-      select(matches("PartSop_Degree|IntervalA|IntervalM|IntervalP|Intervald|Intervalm|Amb|Density|Trimmed|Semitones|AbsoluteIntervallic|AscendingIntervals|AscendingIntervallic|StepwiseMotionDesc|PartSop_LowestNoteIndex|PartSop_HighestNoteIndex")) |>
+      select(matches(alt(melody_quality, melody_core))) |>
       select(-matches("PartSop_RhythmInt")),
 
     Rhythm = df_total |>
-      select(matches("DottedRhythm|AverageDuration|DoubleDottedRhythm|RhythmInt")),
+      select(matches(alt(rhythm_terms))),
 
     Lyrics = df_total |>
-      select(matches("VoicePresence|SyllabicRatio")),
+      select(matches(alt(lyrics_terms))),
 
     All_sop_features = df_total |>
       select(matches("PartSop"))
@@ -166,7 +239,7 @@ get_features_subsets_voice <- function(df_total) {
 
   # 4. Non-categorical version
   cols_to_drop <- features_subsets$All_sop_features |>
-    select(matches("PartSop_Degree|PartSop_IntervalM|PartSop_IntervalP|PartSop_Intervald|PartSop_Intervalm|PartSop_LargestIntervalDesc_|PartSop_Interval*_Per|PartSop_MeanInterval|PartSop_SmallestIntervalAsc|PartSop_LargestIntervalDesc|PartSop_IntervalA.2_Per|PartSop_IntervalA.4_Per|PartSop_IntervalA.5_Per|PartSop_IntervalA1_Per|PartSop_IntervalA11_Per|PartSop_IntervalA2_Per|PartSop_IntervalA3_Per|PartSop_IntervalA4_Per|PartSop_IntervalA5_Per|PartSop_IntervalA6_Per|PartSop_IntervalA8_Per")) |>
+    select(matches(alt(categorical_terms))) |>
     names()
 
   # Features subset
@@ -176,7 +249,7 @@ get_features_subsets_voice <- function(df_total) {
 
 }
 
-# Compute F1 score function
+# Compute the aggregated F1 score of a classifier
 f1 <- function(y, y_hat, average = c("macro", "weighted")) {
 
   # Ensure same factor levels
@@ -196,10 +269,10 @@ f1 <- function(y, y_hat, average = c("macro", "weighted")) {
     fn <- sum(y_hat != cls & y == cls)
     precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
     recall <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
-    f1 <- ifelse(precision + recall == 0,
-                 0,
-                 2 * precision * recall / (precision + recall))
-    f1_per_class[i] <- f1
+    f1_cls <- ifelse(precision + recall == 0,
+                     0,
+                     2 * precision * recall / (precision + recall))
+    f1_per_class[i] <- f1_cls
     weights[i] <- sum(y == cls) / n
 
   }
@@ -218,7 +291,7 @@ f1 <- function(y, y_hat, average = c("macro", "weighted")) {
 
 }
 
-# Bootstrap accuracy
+# Bootstrap distribution of the accuracy of a classifier
 boot_acc <- function(true_labels, pred_labels, n_boot = 1000, seed = 123) {
 
   set.seed(seed) # It is key to ensure the same bootstrap samples are used
@@ -234,20 +307,29 @@ boot_acc <- function(true_labels, pred_labels, n_boot = 1000, seed = 123) {
   return(acc)
 
 }
+
 ```
 
 # Read datasets
 
 ```{r, read-data}
-# Load csv
-df <- read.csv(paste0("Experiment_", experiment, ".csv"),
-               stringsAsFactors = TRUE)
-
 # Choose target column based on experiment
-target_col <- case_when(
-  experiment %in% c(1, 2) ~ "Gender",
-  experiment == 3 ~ "Singer_Sex"
+target_col <- switch(
+  as.character(experiment),
+  "1" = "Gender",
+  "2" = "Gender",
+  "3" = "Singer_Sex",
+  stop("Experiment ", experiment, " not supported (expected 1, 2 or 3)")
 )
+
+# Load csv
+data_file <- paste0("Experiment_", experiment, ".csv")
+if (!file.exists(data_file)) {
+
+  stop("Data file ", data_file, " not found; run from the repository root")
+
+}
+df <- read.csv(data_file, stringsAsFactors = TRUE)
 
 # Rename target to 'y'
 df <- df |>
@@ -258,11 +340,74 @@ df |>
   group_by(y) |>
   summarise(n = n(), .groups = "drop")
 
-# Split into train / test (85% / 15%)
+# Split into train / test (85% / 15%), stratified by y so that both sets
+# preserve the class balance of the full dataset
 set.seed(123)
-split_obj <- initial_split(df, prop = 0.85)
+split_obj <- initial_split(df, prop = 0.85, strata = y)
 train <- training(split_obj)
 test <- testing(split_obj)
+```
+
+# Corpus vocal ranges
+
+```{r, fig1-vocal-ranges}
+#| fig.width: 7.5
+#| fig.height: 2.9
+# Two-panel boxplots of the arias' vocal ranges: highest and lowest notes by
+# premiering singer's sex (arias with a known singer, Experiment_3.csv) and by
+# character gender (all arias, Experiment_1.csv). Independent of the current
+# experiment, so it is rendered only in the experiment == 1 pass.
+if (experiment == 1) {
+
+  read_ranges <- function(file, target, panel, labels) {
+    raw <- read.csv(file, stringsAsFactors = FALSE)
+    bind_rows(
+      tibble(group = labels[raw[[target]]], note = "Highest notes",
+             index = raw$PartSop_HighestNoteIndex),
+      tibble(group = labels[raw[[target]]], note = "Lowest notes",
+             index = raw$PartSop_LowestNoteIndex)
+    ) |>
+      mutate(panel = panel)
+  }
+  ranges_df <- bind_rows(
+    read_ranges("Experiment_3.csv", "Singer_Sex", "Singer",
+                c("Female" = "Female", "Male" = "Male")),
+    read_ranges("Experiment_1.csv", "Gender", "Character",
+                c("Female" = "Feminine", "Male" = "Masculine"))
+  ) |>
+    mutate(panel = factor(panel, levels = c("Singer", "Character")))
+
+  # C-note axis: note index 60 = C4, so octave number = index / 12 - 1
+  c_breaks <- seq(48, 96, by = 12)
+  plot_ranges <- ggplot(ranges_df, aes(x = group, y = index, fill = note)) +
+    geom_boxplot(outlier.shape = 1, outlier.size = 0.8) +
+    facet_wrap(~ panel, scales = "free_x", strip.position = "bottom") +
+    scale_fill_manual(values = c("Highest notes" = "grey35",
+                                 "Lowest notes" = "grey85")) +
+    scale_y_continuous(breaks = c_breaks,
+                       labels = paste0("C", c_breaks / 12 - 1),
+                       limits = c(48, 96)) +
+    labs(x = NULL, y = "Note", fill = NULL) +
+    theme_bw() +
+    theme(strip.placement = "outside",
+          strip.background = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = c(0.998, 0.995),
+          legend.justification = c(1, 1),
+          legend.key.size = grid::unit(0.85, "lines"),
+          legend.text = element_text(size = 8),
+          # Careful with randomForest::margin()
+          legend.margin = ggplot2::margin(1, 3, 1, 1),
+          legend.background = element_rect(fill = "white", colour = "grey60",
+                                           linewidth = 0.3))
+  plot_ranges
+
+  # Save plot
+  dir.create("plots", showWarnings = FALSE, recursive = TRUE)
+  ggsave("plots/singers_vs_characters_ranges.png", plot = plot_ranges,
+         width = 7.5, height = 2.9, dpi = 300, bg = "white")
+
+}
 ```
 
 ```{r, recipes-subset}
@@ -291,29 +436,29 @@ combined <- bind_rows(train, test)
 # Preprocessing recipe
 preprocess_recipe <- function(data) {
   recipe(y ~ ., data = data) |>
-    # Preprocess all predictors BEFORE dummying
+    # Filter and impute all predictors BEFORE dummying.
     step_zv(all_predictors()) |>
     step_nzv(all_predictors()) |>
     step_filter_missing(all_predictors(), threshold = 0.05) |>
     step_impute_knn(all_predictors(), neighbors = 5) |>
     # Collapse rare factor levels (BEFORE dummy creation)
     step_other(all_nominal_predictors(), threshold = 0.10) |>
-    # Preprocess numeric predictors only
+    # Decorrelate numeric predictors only
     step_corr(all_numeric_predictors(), threshold = 0.80) |>
     step_lincomb(all_numeric_predictors(), max_steps = 20) |>
-    step_normalize(all_numeric_predictors()) |>
-    # Create dummy variables (AFTER normalization)
-    # Use one-hot encoding such that no dummy variable is dropped and we can
-    # later drop the "other" level manually (so it becomes the reference level
-    # and we avoid hard-to-explain dummies in the final model)
-    # step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
-    step_dummy(all_nominal_predictors(), one_hot = FALSE) |>
-    # Drop the dummies for the "other" level
+    # Create dummy variables. With one_hot = TRUE every
+    # level surviving step_other() gets an indicator; dropping "_other" below
+    # then makes the pooled rare levels the reference
+    step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+    # Drop the dummies for the "other" level, making it the reference
     step_rm(ends_with("_other")) |>
     # Post-dummy cleanup
     step_zv(all_predictors()) |>
     step_nzv(all_predictors()) |>
-    step_lincomb(all_predictors(), max_steps = 20)
+    step_lincomb(all_predictors(), max_steps = 20) |>
+    # Standardize LAST so the dummy indicators are standardized too and every
+    # column enters glmnet on unit-sd scale
+    step_normalize(all_numeric_predictors())
 }
 ```
 
@@ -334,7 +479,7 @@ prep_all <- prep(rec_all)
 all_bake <- bake(prep_all, new_data = NULL)
 
 # Export datasets for future reference and use
-dir.create("preprocessed_datasets", showWarnings = FALSE)
+dir.create("preprocessed_datasets", showWarnings = FALSE, recursive = TRUE)
 write.csv(train_bake, paste0("preprocessed_datasets/train_bake_exp", experiment,
                              "_sub_", subset_name, ".csv"),
           row.names = FALSE)
@@ -351,13 +496,15 @@ write.csv(all_bake, paste0("preprocessed_datasets/all_bake_", experiment,
 ## Fitting
 
 ```{r, log1-fit}
-# Fit by 10-fold cross-validation
+# Fit by 10-fold cross-validation, with folds stratified by y and shared
+# between the lasso and ridge fits so that both models see the same partitions
 set.seed(42)
 train_bake_no_y <- train_bake |>
   select(-y) |>
   as.matrix()
+foldid_train <- caret::createFolds(train_bake$y, k = n_folds, list = FALSE)
 cv1_train <- cv.glmnet(x = train_bake_no_y, y = train_bake$y,
-                       family = "binomial", alpha = 1, nfolds = 10)
+                       family = "binomial", alpha = 1, foldid = foldid_train)
 plot(cv1_train)
 ```
 
@@ -405,10 +552,9 @@ coefs1_train |>
 ## Fitting
 
 ```{r, log0-fit}
-# Fit by 10-fold cross-validation
-set.seed(42)
+# Fit by 10-fold cross-validation, reusing the stratified folds of the lasso
 cv0_train <- cv.glmnet(x = train_bake_no_y, y = train_bake$y,
-                       family = "binomial", alpha = 0, nfolds = 10)
+                       family = "binomial", alpha = 0, foldid = foldid_train)
 plot(cv0_train)
 ```
 
@@ -455,17 +601,17 @@ coefs0_train |>
 
 ```{r, rf-fit}
 #| message: false
-# Set seeds for reproducibility in caret with RF
+# Set seeds for reproducibility in caret with RF. caret expects a list of
+# length n_folds + 1: one integer vector per fold (as long as the tuning grid)
+# plus a final seed for the fit on the full training set.
 set.seed(42)
-n_folds <- 10
-n_tune <- 5
 rf_seeds <- c(
   lapply(seq_len(n_folds), function(i) rep(i, n_tune)),
   list(999L)
 )
 
-# Define 10-fold CV
-cv_ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE,
+# Define the cross-validation scheme
+cv_ctrl <- trainControl(method = "cv", number = n_folds, classProbs = TRUE,
                         summaryFunction = twoClassSummary,
                         savePredictions = "final", seeds = rf_seeds)
 
@@ -489,7 +635,7 @@ p_test_hat_RF <- predict(rf_train, newdata = test_train_bake_no_y,
 
 ```{r, rf-metrics}
 # Metrics
-acc_RF <- mean(test_train_bake$y == y_test_hat_RF)
+acc_RF <- mean(test$y == y_test_hat_RF)
 auc_RF <- auc_binary(test$y, p_test_hat_RF)
 f1_RF <- f1(test$y, y_test_hat_RF)
 data.frame("Accuracy" = acc_RF, "AUC" = auc_RF, "Macro_F1" = f1_RF) |>
@@ -512,7 +658,7 @@ rf_importance |>
 
 ```{r, save-predictions}
 # Save predictions for all models
-dir.create("results/y_hats", showWarnings = FALSE)
+dir.create("results/y_hats", showWarnings = FALSE, recursive = TRUE)
 datasets_to_save <- list(
   RL = y_test_hat_RL,
   LL = y_test_hat_LL,
@@ -521,12 +667,12 @@ datasets_to_save <- list(
 )
 for (name in names(datasets_to_save)) {
 
-  data_to_write <- datasets_to_save[[name]]
-
-  # If it's a vector, convert to data frame
-  if (is.vector(data_to_write)) {
-    data_to_write <- data.frame(prediction = data_to_write)
-  }
+  # Coerce to a one-column data frame with a stable column name. Note that
+  # is.vector() is FALSE for both the glmnet class-prediction matrices and the
+  # y_true factor, so the labels have to be extracted with as.vector().
+  data_to_write <- data.frame(
+    prediction = as.vector(datasets_to_save[[name]])
+  )
 
   # Construct filename
   file_name <- paste0("results/y_hats/", name, "_", experiment,
@@ -555,7 +701,6 @@ metrics_table |>
 
 ```{r, boot}
 # Run bootstrapping of accuracy with predictions
-B <- 10000
 boot_RL <- boot_acc(test$y, y_test_hat_RL, n_boot = B, seed = 123)
 boot_LL <- boot_acc(test$y, y_test_hat_LL, n_boot = B, seed = 123)
 boot_RF <- boot_acc(test$y, y_test_hat_RF, n_boot = B, seed = 123)
@@ -569,9 +714,9 @@ diff_boot_RF_LL <- boot$RF - boot$LL
 p_RF_vs_RL <- (1 + sum(diff_boot_RF_RL <= 0)) / (B + 1)
 p_RF_vs_LL <- (1 + sum(diff_boot_RF_LL <= 0)) / (B + 1)
 
-# Two-sided 95% confidence intervals for differences
-ci_diff_RL <- quantile(diff_boot_RF_RL, probs = c(0.025, 0.975))
-ci_diff_LL <- quantile(diff_boot_RF_LL, probs = c(0.025, 0.975))
+# Two-sided confidence intervals for differences
+ci_diff_RL <- quantile(diff_boot_RF_RL, probs = ci_probs)
+ci_diff_LL <- quantile(diff_boot_RF_LL, probs = ci_probs)
 
 # Add bootstrap tests to metrics table
 metrics_table <- metrics_table |>
@@ -612,10 +757,10 @@ p_RL_vs_MC <- (1 + sum(diff_boot_RL_MC <= 0)) / (B + 1)
 p_LL_vs_MC <- (1 + sum(diff_boot_LL_MC <= 0)) / (B + 1)
 p_RF_vs_MC <- (1 + sum(diff_boot_RF_MC <= 0)) / (B + 1)
 
-# Two-sided 95% confidence intervals for differences
-ci_diff_RL_MC <- quantile(diff_boot_RL_MC, probs = c(0.025, 0.975))
-ci_diff_LL_MC <- quantile(diff_boot_LL_MC, probs = c(0.025, 0.975))
-ci_diff_RF_MC <- quantile(diff_boot_RF_MC, probs = c(0.025, 0.975))
+# Two-sided confidence intervals for differences
+ci_diff_RL_MC <- quantile(diff_boot_RL_MC, probs = ci_probs)
+ci_diff_LL_MC <- quantile(diff_boot_LL_MC, probs = ci_probs)
+ci_diff_RF_MC <- quantile(diff_boot_RF_MC, probs = ci_probs)
 
 # Combine all metrics into a single table
 metrics_table_MC <- data.frame(
@@ -645,7 +790,7 @@ metrics_table_combined |>
   kable(digits = 4)
 
 # Save table of all metrics + bootstrap tests
-dir.create("results/experiments", showWarnings = FALSE)
+dir.create("results/experiments", showWarnings = FALSE, recursive = TRUE)
 write.csv(metrics_table_combined, paste0("results/experiments/all_results_",
                                          "Experiment_", experiment,
                                          "_sub_", subset_name, ".csv"),
@@ -681,8 +826,9 @@ set.seed(42)
 all_bake_no_y <- all_bake |>
   select(-y) |>
   as.matrix()
+foldid_all <- caret::createFolds(all_bake$y, k = n_folds, list = FALSE)
 cv0_all <- cv.glmnet(x = all_bake_no_y, y = all_bake$y, family = "binomial",
-                     alpha = 0, nfolds = 10)
+                     alpha = 0, foldid = foldid_all)
 plot(cv0_all)
 cv0_all
 ```
@@ -691,27 +837,50 @@ cv0_all
 #| out.width: '100%'
 #| fig.width: 10
 #| fig.height: 10
-# Confidence intervals for all coefficients
-ci_df <- logistic_ridge_ci(X = all_bake_no_y, y = all_bake$y,
-                           beta_hat = coef(cv0_all, s = cv0_all$lambda.1se),
-                           lambda = nrow(all_bake) * cv0_all$lambda.1se / 2)
+# Bonferroni-corrected confidence intervals for all coefficients; the family
+# is the p slopes of this case study (the intercept keeps a marginal CI)
+p_slopes <- ncol(all_bake_no_y)
+ci_df_all <- logistic_ridge_ci(X = all_bake_no_y,
+                               beta_hat = coef(cv0_all, s = cv0_all$lambda.1se),
+                               lambda = nrow(all_bake) * cv0_all$lambda.1se / 2,
+                               level = level, m = p_slopes)
 
-# Filter significant coefficients and order by effect size
-ci_df <- ci_df |>
-  filter(sign(ci_low * ci_up) > 0) |>
+# Effect sizes as percent changes in odds, exported to CSV for the paper
+ci_df_all <- ci_df_all |>
   mutate(
     pct_change = (exp(estimate) - 1) * 100,
     pct_low = (exp(ci_low) - 1) * 100,
     pct_up = (exp(ci_up) - 1) * 100
-  ) |>
+  )
+dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
+write.csv(ci_df_all, paste0("results/final_model/ci_df_Experiment_",
+                            experiment, "_sub_", subset_name, ".csv"),
+          row.names = FALSE)
+
+# Significant slopes with and without the Bonferroni correction, for reference
+slopes_df <- ci_df_all |>
+  filter(term != "(Intercept)")
+zcrit_marg <- qnorm(1 - (1 - level) / 2)
+data.frame(
+  Rule = c("Unadjusted (marginal CI excludes 0)",
+           "Bonferroni (simultaneous CI excludes 0)"),
+  N_selected = c(sum(abs(slopes_df$z_value) > zcrit_marg),
+                 sum(sign(slopes_df$ci_low * slopes_df$ci_up) > 0)),
+  N_total = nrow(slopes_df)
+) |>
+  kable()
+
+# Filter significant slopes (corrected CI excluding zero), order by effect size
+ci_df <- slopes_df |>
+  filter(sign(ci_low * ci_up) > 0) |>
   mutate(
     term = factor(term, levels = term[order(pct_change, decreasing = FALSE)]
     )
   )
 ci_df |>
-  select(term, pct_change, pct_low, pct_up, p_value) |>
+  select(term, pct_change, pct_low, pct_up, p_value, p_value_adj) |>
   arrange(desc(pct_change)) |>
-  kable(digits = 2)
+  kable(digits = 4)
 
 # Plot of coefficients in odds
 plot_RL <- ggplot(ci_df, aes(x = term, y = pct_change,
@@ -721,17 +890,20 @@ plot_RL <- ggplot(ci_df, aes(x = term, y = pct_change,
   coord_flip() +
   labs(
     x = NULL,
-    y = "Percent change in odds (per 1-unit SD increase in numerical\npredictor or presence of categorical predictor)"
+    y = paste0("Percent change in odds (per 1-SD increase in each predictor;",
+               "\ninterval-category indicators standardized as well)")
   ) +
   theme_bw()
 plot_RL
 
 # Save plot
+dir.create("plots", showWarnings = FALSE, recursive = TRUE)
 plot_name <- paste0("plots/plot_rl", "_", experiment,
                     "_sub_", subset_name, ".png")
-ggsave(filename = plot_name, plot = plot_RL, width = 8, height = 6, dpi = 300)
+ggsave(filename = plot_name, plot = plot_RL, width = 7.5, height = 6,
+       dpi = 300)
 
-# Metrics on all data available, just for reference
+# Metrics on all data available (in-sample), just for reference
 y_all_hat_RL <- predict(cv0_all, newx = all_bake_no_y, s = "lambda.1se",
                         type = "class")
 p_all_hat_RL <- predict(cv0_all, newx = all_bake_no_y, s = "lambda.1se",
@@ -741,12 +913,13 @@ auc_all_RL <- auc_binary(all_bake$y, p_all_hat_RL)
 f1_all_RL <- f1(all_bake$y, y_all_hat_RL)
 glmnet_summary <- data.frame("Accuracy" = acc_all_RL, "AUC" = auc_all_RL,
                              "Macro_F1" = f1_all_RL,
-                             "Model" = "Ridge Logistic (RL)")
+                             "Model" = "Ridge Logistic (RL)",
+                             "Evaluation" = "In-sample (train + test)")
 glmnet_summary |>
   kable(digits = 4)
 
 # Save results
-dir.create("results/final_model", showWarnings = FALSE)
+dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
 write.csv(glmnet_summary, paste0("results/final_model/RL_final_model_results",
                                  "_Experiment_", experiment, "_sub_",
                                  subset_name, ".csv"),

@@ -1,21 +1,23 @@
 #!/bin/bash
 
-# Script to run gender dynamics experiments
-# This script executes the R code to render Models.qmd for experiments 1-3
+# Script to run the soprano voice experiments.
+# Renders Models.qmd once per (experiment, subset) combination.
 
-Rscript -e "
+set -euo pipefail
+
+Rscript -e '
 exps <- 1:3
 subsets <- c(
-  \"Sop_features_non_cat\"
+  "Sop_features_non_cat"
 )
 for (exp in exps) {
   for (s in subsets) {
-    message(\"Rendering for experiment: \", exp, \" and subset: \", s)
+    message("Rendering for experiment: ", exp, " and subset: ", s)
     quarto::quarto_render(
-      input = \"Models.qmd\",
+      input = "Models.qmd",
       execute_params = list(experiment = exp, subset_name = s),
-      output_file = paste0(\"Experiment_\", exp, \"_\", s, \".pdf\")
+      output_file = paste0("Experiment_", exp, "_", s, ".pdf")
     )
   }
 }
-"
+'
