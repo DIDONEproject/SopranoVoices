@@ -2,7 +2,6 @@
 title: "Gender dynamics experiments"
 params:
   experiment: 1
-  subset_name: "Sop_features_non_cat"
 author: "Eduardo García-Portugués, Carlos Vaquero"
 date: '`r Sys.Date()`'
 format:
@@ -19,23 +18,17 @@ editor_options:
 ```{=html}
 <!--
 
-# This report is rendered once per (experiment, subset) combination.
+# This report is rendered once per experiment.
 # To reproduce all experiments, run ./experiments.sh from the repository root.
 # Alternatively, execute the following block in R:
 
-exps <- 1:3
-subsets <- c(
-  "Sop_features_non_cat"
-)
-for (exp in exps) {
-  for (s in subsets) {
-    message("Rendering for experiment: ", exp, " and subset: ", s)
-    quarto::quarto_render(
-      input = "Models.qmd",
-      execute_params = list(experiment = exp, subset_name = s),
-      output_file = paste0("Experiment_", exp,"_", s, ".pdf")
-    )
-  }
+for (exp in 1:3) {
+  message("Rendering for experiment: ", exp)
+  quarto::quarto_render(
+    input = "Models.qmd",
+    execute_params = list(experiment = exp),
+    output_file = paste0("Experiment_", exp, ".pdf")
+  )
 }
 
 --->
@@ -44,14 +37,13 @@ for (exp in exps) {
 ```{r, setup-params}
 #| echo: false
 # Report parameters
-subset_name <- params$subset_name
 experiment <- params$experiment
-message("Running experiment ", experiment, " with subset ", subset_name)
+message("Running experiment ", experiment)
 
 # Analysis constants, referenced throughout the report
 n_folds <- 10 # Folds for every cross-validation (glmnet and caret)
 n_tune <- 5 # Grid size for the random forest mtry tuning
-B <- 10000 # Bootstrap replicates for model comparison
+B <- 100000 # Bootstrap replicates for model comparison
 level <- 0.95 # Confidence level for all intervals
 ci_probs <- c((1 - level) / 2, 1 - (1 - level) / 2)
 ```
@@ -79,8 +71,7 @@ sessionInfo()
 #| cache: false
 knitr::opts_chunk$set(
   echo = TRUE, cache = FALSE, warning = FALSE, message = FALSE,
-  fig.path = paste0("Models_files/Experiment_", params$experiment, "_",
-                    params$subset_name, "/")
+  fig.path = paste0("Models_files/Experiment_", params$experiment, "/")
 )
 
 # Compute the AUC of a binary classifier.
@@ -162,34 +153,12 @@ logistic_ridge_ci <- function(X, beta_hat, lambda, level = 0.95, m = NULL) {
 # Collapse a set of regex alternatives into a single pattern
 alt <- function(...) paste(c(...), collapse = "|")
 
-# Windowed, and jSymbolic / music21 columns, plus the non-Soprano parts
-drop_general <- c(
-  "_win_", "js_.*", "m21.*", "SoundSop", "Count", "Sum", "Notes",
-  "SoundingMeasures", "SopI", "SopII", "SopIII", "PartSop_Syllables"
+# Windowed, count/sum, note-name, and syllable columns to exclude
+drop_terms <- c(
+  "_win_", "Count", "Sum", "Notes", "SoundingMeasures", "PartSop_Syllables"
 )
 
-# Melodic contour, range, and interval-size descriptors
-melody_core <- c(
-  "Amb", "Density", "Trimmed", "Semitones", "AbsoluteIntervallic",
-  "AscendingIntervals", "AscendingIntervallic", "StepwiseMotionDesc",
-  "PartSop_LowestNoteIndex", "PartSop_HighestNoteIndex"
-)
-
-# Interval-quality descriptors, added on top of melody_core
-melody_quality <- c(
-  "PartSop_Degree", "IntervalA", "IntervalM", "IntervalP", "Intervald",
-  "Intervalm"
-)
-
-# Rhythmic descriptors
-rhythm_terms <- c(
-  "DottedRhythm", "AverageDuration", "DoubleDottedRhythm", "RhythmInt"
-)
-
-# Text-setting descriptors
-lyrics_terms <- c("VoicePresence", "SyllabicRatio")
-
-# Categorical columns excluded from the non-categorical subset
+# Categorical columns excluded from the feature set
 categorical_terms <- c(
   "PartSop_Degree", "PartSop_IntervalM", "PartSop_IntervalP",
   "PartSop_Intervald", "PartSop_Intervalm", "PartSop_MeanInterval",
@@ -202,50 +171,17 @@ categorical_terms <- c(
   "PartSop_IntervalA8_Per"
 )
 
-# Extract features according to the types of subsets defined.
-get_features_subsets_voice <- function(df_total) {
+# Names of the non-categorical soprano features considered in the study:
+# the PartSop_* columns minus the windowed/count/note-name/syllable columns,
+# the note-name variants of the highest/lowest notes, and the categorical
+# interval descriptors.
+select_sop_features <- function(df) {
 
-  # 1. Drop unwanted columns by regex
-  df_total <- df_total |>
-    select(-matches(alt(drop_general)),
-           -matches("^PartSop_HighestNote($|_[A-Za-z0-9]+)"),
-           -matches("^PartSop_LowestNote($|_[A-Za-z0-9]+)"))
-
-  # 2. Keep only Sop* features (no target)
-  df_total <- df_total |>
-    select(matches("^Sop|^PartSop")) |>
-    # remove only columns like PartSop_HighestNote_G5 and PartSop_LowestNote_C4
-    select(-matches("^PartSop_HighestNote_.+|^PartSop_LowestNote_.+"))
-
-  # 3. Feature subset definitions
-  features_subsets <- list(
-    Melody = df_total |>
-      select(matches(alt(melody_core))) |>
-      select(-matches("PartSop_RhythmInt")),
-
-    Melody_extended = df_total |>
-      select(matches(alt(melody_quality, melody_core))) |>
-      select(-matches("PartSop_RhythmInt")),
-
-    Rhythm = df_total |>
-      select(matches(alt(rhythm_terms))),
-
-    Lyrics = df_total |>
-      select(matches(alt(lyrics_terms))),
-
-    All_sop_features = df_total |>
-      select(matches("PartSop"))
-  )
-
-  # 4. Non-categorical version
-  cols_to_drop <- features_subsets$All_sop_features |>
-    select(matches(alt(categorical_terms))) |>
-    names()
-
-  # Features subset
-  features_subsets$Sop_features_non_cat <-
-    features_subsets$All_sop_features |> select(-all_of(cols_to_drop))
-  return(features_subsets)
+  feats <- grep("^PartSop_", colnames(df), value = TRUE)
+  feats <- feats[!grepl(alt(drop_terms), feats)]
+  feats <- feats[!grepl("^PartSop_HighestNote($|_)|^PartSop_LowestNote($|_)",
+                        feats)]
+  feats[!grepl(alt(categorical_terms), feats)]
 
 }
 
@@ -310,40 +246,59 @@ boot_acc <- function(true_labels, pred_labels, n_boot = 1000, seed = 123) {
 
 ```
 
-# Read datasets
+# Read dataset
 
 ```{r, read-data}
-# Choose target column based on experiment
-target_col <- switch(
-  as.character(experiment),
-  "1" = "Gender",
-  "2" = "Gender",
-  "3" = "Singer_Sex",
-  stop("Experiment ", experiment, " not supported (expected 1, 2 or 3)")
-)
-
-# Load csv
-data_file <- paste0("Experiment_", experiment, ".csv")
+# Load the single-source dataset (built by make_sopranovoices.R). The literal
+# NA values in Sex (arias with no singer record) become real NAs, and
+# stringsAsFactors turns Gender/Sex and the four character-valued interval
+# features into factors with alphabetical levels, so the second level is the
+# masculine/male class in every experiment
+data_file <- "sopranovoices.csv"
 if (!file.exists(data_file)) {
 
   stop("Data file ", data_file, " not found; run from the repository root")
 
 }
-df <- read.csv(data_file, stringsAsFactors = TRUE)
+df_all <- read.csv(data_file, stringsAsFactors = TRUE)
+stopifnot(nrow(df_all) == 1682, ncol(df_all) == 576)
 
-# Rename target to 'y'
+# Metadata columns, never used as predictors
+meta_cols <- c("AriaId", "ariaTitle", "AriaOpera", "Character", "Gender",
+               "Composer", "Year", "Singer", "Sex")
+
+# Experiment subsets and target y:
+# 1 = all arias, y = character gender;
+# 2 = arias whose character gender aligns with the singer's sex, y = gender;
+# 3 = arias with a known singer, y = singer's sex
+df <- switch(
+  as.character(experiment),
+  "1" = df_all |>
+    mutate(y = Gender),
+  "2" = df_all |>
+    filter((Gender == "Feminine" & Sex == "Female") |
+             (Gender == "Masculine" & Sex == "Male")) |>
+    mutate(y = Gender),
+  "3" = df_all |>
+    filter(!is.na(Sex)) |>
+    mutate(y = Sex),
+  stop("Experiment ", experiment, " not supported (expected 1, 2 or 3)")
+)
+
+# Drop metadata and any factor levels emptied by the filters
 df <- df |>
-  rename(y = !!target_col)
+  select(-all_of(meta_cols)) |>
+  droplevels()
 
 # Number of observations per group
 df |>
   group_by(y) |>
   summarise(n = n(), .groups = "drop")
 
-# Split into train / test (85% / 15%), stratified by y so that both sets
-# preserve the class balance of the full dataset
+# Split into train / test (70% / 30%), stratified by y so that both sets
+# preserve the class balance of the full dataset.
 set.seed(123)
-split_obj <- initial_split(df, prop = 0.85, strata = y)
+split_obj <- initial_split(df, prop = 0.70, strata = y)
 train <- training(split_obj)
 test <- testing(split_obj)
 ```
@@ -354,26 +309,24 @@ test <- testing(split_obj)
 #| fig.width: 7.5
 #| fig.height: 2.9
 # Two-panel boxplots of the arias' vocal ranges: highest and lowest notes by
-# premiering singer's sex (arias with a known singer, Experiment_3.csv) and by
-# character gender (all arias, Experiment_1.csv). Independent of the current
-# experiment, so it is rendered only in the experiment == 1 pass.
+# premiering singer's sex (arias with a known singer) and by character gender
+# (all arias). Independent of the current experiment, so it is rendered only
+# in the experiment == 1 pass.
 if (experiment == 1) {
 
-  read_ranges <- function(file, target, panel, labels) {
-    raw <- read.csv(file, stringsAsFactors = FALSE)
+  make_ranges <- function(data, group, panel) {
     bind_rows(
-      tibble(group = labels[raw[[target]]], note = "Highest notes",
-             index = raw$PartSop_HighestNoteIndex),
-      tibble(group = labels[raw[[target]]], note = "Lowest notes",
-             index = raw$PartSop_LowestNoteIndex)
+      tibble(group = group, note = "Highest notes",
+             index = data$PartSop_HighestNoteIndex),
+      tibble(group = group, note = "Lowest notes",
+             index = data$PartSop_LowestNoteIndex)
     ) |>
       mutate(panel = panel)
   }
+  singers <- df_all |> filter(!is.na(Sex))
   ranges_df <- bind_rows(
-    read_ranges("Experiment_3.csv", "Singer_Sex", "Singer",
-                c("Female" = "Female", "Male" = "Male")),
-    read_ranges("Experiment_1.csv", "Gender", "Character",
-                c("Female" = "Feminine", "Male" = "Masculine"))
+    make_ranges(singers, as.character(singers$Sex), "Singer"),
+    make_ranges(df_all, as.character(df_all$Gender), "Character")
   ) |>
     mutate(panel = factor(panel, levels = c("Singer", "Character")))
 
@@ -410,15 +363,58 @@ if (experiment == 1) {
 }
 ```
 
-```{r, recipes-subset}
-# Determine subset based ONLY on training data
-features_list_train <- get_features_subsets_voice(train)
-if (!(subset_name %in% names(features_list_train))) {
-  stop("Subset ", subset_name, " not found")
-}
+# Dataset summary tables
 
-# Select features based on subset name
-selected_features <- colnames(features_list_train[[subset_name]])
+```{r, dataset-summary}
+# Sources for the corpus-description tables of the paper: character gender vs.
+# premiering singer's sex (Table 1) and the per-character breakdown (Table 2).
+# Independent of the current experiment, so written only in the
+# experiment == 1 pass.
+if (experiment == 1) {
+
+  dir.create("results/dataset_summary", showWarnings = FALSE, recursive = TRUE)
+
+  # Table 1: distribution of arias by character gender and singer sex
+  singer_col <- factor(
+    ifelse(is.na(df_all$Sex), "Unknown singers",
+           paste(df_all$Sex, "singers")),
+    levels = c("Male singers", "Female singers", "Unknown singers")
+  )
+  table1 <- as.data.frame.matrix(table(df_all$Gender, singer_col)) |>
+    rownames_to_column("Gender")
+  write.csv(table1, "results/dataset_summary/table1_distribution.csv",
+            row.names = FALSE)
+  table1 |>
+    kable()
+
+  # Table 2: per-character singer-sex breakdown
+  table2 <- df_all |>
+    group_by(Character) |>
+    summarise(
+      Gender = first(Gender),
+      female_ratio = ifelse(sum(!is.na(Sex)) > 0,
+                            sum(Sex == "Female", na.rm = TRUE) /
+                              sum(!is.na(Sex)), NA),
+      male_ratio = ifelse(sum(!is.na(Sex)) > 0,
+                          sum(Sex == "Male", na.rm = TRUE) /
+                            sum(!is.na(Sex)), NA),
+      known = sum(!is.na(Sex)),
+      total = n(),
+      .groups = "drop"
+    ) |>
+    arrange(desc(known), desc(total))
+  write.csv(table2, "results/dataset_summary/table2_characters.csv",
+            row.names = FALSE)
+  table2 |>
+    kable(digits = 2)
+
+}
+```
+
+```{r, recipes-subset}
+# Feature selection is name-based (deterministic given the column names)
+selected_features <- select_sop_features(train)
+stopifnot(length(selected_features) == 86)
 train <- train |>
   select(all_of(selected_features), y)
 test <- test |>
@@ -426,8 +422,8 @@ test <- test |>
 dim(train)
 dim(test)
 
-# Combined dataset for recipes
-combined <- bind_rows(train, test)
+# Full dataset for the final-model recipe
+  select(all_of(selected_features), y)
 ```
 
 # Preprocessing recipes
@@ -480,14 +476,14 @@ all_bake <- bake(prep_all, new_data = NULL)
 
 # Export datasets for future reference and use
 dir.create("preprocessed_datasets", showWarnings = FALSE, recursive = TRUE)
-write.csv(train_bake, paste0("preprocessed_datasets/train_bake_exp", experiment,
-                             "_sub_", subset_name, ".csv"),
+write.csv(train_bake, paste0("preprocessed_datasets/train_bake_exp",
+                             experiment, ".csv"),
           row.names = FALSE)
 write.csv(test_train_bake, paste0("preprocessed_datasets/test_train_bake_exp",
-                                  experiment, "_sub_", subset_name, ".csv"),
+                                  experiment, ".csv"),
           row.names = FALSE)
-write.csv(all_bake, paste0("preprocessed_datasets/all_bake_", experiment,
-                           "_sub_", subset_name, ".csv"),
+write.csv(all_bake, paste0("preprocessed_datasets/all_bake_exp", experiment,
+                           ".csv"),
           row.names = FALSE)
 ```
 
@@ -675,8 +671,7 @@ for (name in names(datasets_to_save)) {
   )
 
   # Construct filename
-  file_name <- paste0("results/y_hats/", name, "_", experiment,
-                      "_sub_", subset_name, ".csv")
+  file_name <- paste0("results/y_hats/", name, "_", experiment, ".csv")
 
   # Write CSV
   write.csv(data_to_write, file_name, row.names = FALSE)
@@ -792,8 +787,7 @@ metrics_table_combined |>
 # Save table of all metrics + bootstrap tests
 dir.create("results/experiments", showWarnings = FALSE, recursive = TRUE)
 write.csv(metrics_table_combined, paste0("results/experiments/all_results_",
-                                         "Experiment_", experiment,
-                                         "_sub_", subset_name, ".csv"),
+                                         "Experiment_", experiment, ".csv"),
           row.names = FALSE)
 ```
 
@@ -854,7 +848,7 @@ ci_df_all <- ci_df_all |>
   )
 dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
 write.csv(ci_df_all, paste0("results/final_model/ci_df_Experiment_",
-                            experiment, "_sub_", subset_name, ".csv"),
+                            experiment, ".csv"),
           row.names = FALSE)
 
 # Significant slopes with and without the Bonferroni correction, for reference
@@ -898,8 +892,7 @@ plot_RL
 
 # Save plot
 dir.create("plots", showWarnings = FALSE, recursive = TRUE)
-plot_name <- paste0("plots/plot_rl", "_", experiment,
-                    "_sub_", subset_name, ".png")
+plot_name <- paste0("plots/plot_rl_", experiment, ".png")
 ggsave(filename = plot_name, plot = plot_RL, width = 7.5, height = 6,
        dpi = 300)
 
@@ -921,7 +914,6 @@ glmnet_summary |>
 # Save results
 dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
 write.csv(glmnet_summary, paste0("results/final_model/RL_final_model_results",
-                                 "_Experiment_", experiment, "_sub_",
-                                 subset_name, ".csv"),
+                                 "_Experiment_", experiment, ".csv"),
           row.names = FALSE)
 ```

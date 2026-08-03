@@ -4,6 +4,16 @@ Repository reproducing the experiments from the paper:
 
 > Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). Soprano voices in opera seria: A corpus-based inquiry into eighteenth-century vocal types. *Submitted*.
 
+## Data
+
+The data source is `sopranovoices.csv` (the dataset deposited on Zenodo): 1,682 soprano arias with nine metadata columns (`AriaId`, `ariaTitle`, `AriaOpera`, `Character`, `Gender`, `Composer`, `Year`, `Singer`, `Sex`) and the 567 principal-soprano `musif` features (`PartSop_*`). It is built from the raw extraction `dataset_def2.csv` by `make_sopranovoices.R`, which purges the placeholder and non-soprano columns, repairs two data-entry artifacts, and re-encodes to UTF-8:
+
+```sh
+Rscript make_sopranovoices.R
+```
+
+The three experiment subsets are derived inside `Models.qmd`: (1) all arias, target = character gender; (2) arias whose character gender aligns with the premiering singer's sex, target = character gender; (3) arias with a known singer, target = singer's sex.
+
 ## Reproducing the experiments
 
 From the repository root:
@@ -16,18 +26,16 @@ This renders `Models.qmd` once per experiment (1-3) and writes:
 
 | Output | Contents |
 | --- | --- |
-| `Experiment_<n>_<subset>.pdf` | Full report per experiment |
+| `Experiment_<n>.pdf` | Full report per experiment |
 | `preprocessed_datasets/` | Baked train / test / combined designs |
+| `results/dataset_summary/` | Corpus-description tables of the paper (written in the experiment-1 pass) |
 | `results/experiments/` | Test-set metrics and model comparisons |
-| `results/final_model/` | Ridge fit on all data (in-sample, for reference only) |
+| `results/final_model/` | Ridge fit on all data (coefficient CIs; in-sample metrics for reference only) |
 | `results/y_hats/` | Per-model test-set predictions |
-| `plots/` | Coefficient plots |
+| `plots/` | Coefficient plots and the vocal-ranges figure |
 
-`experiments.sh` is the single source of truth for the render loop; edit the
-experiment and subset lists there rather than duplicating them elsewhere.
+`experiments.sh` is the single source of truth for the render loop; edit the experiment list there rather than duplicating it elsewhere.
 
 ### Requirements
 
-R (>= 4.4), [Quarto](https://quarto.org), a LaTeX engine providing `xelatex`,
-and the R packages `knitr`, `dplyr`, `recipes`, `rsample`, `yardstick`,
-`glmnet`, `ggplot2`, `caret`, `randomForest`, `tibble` and `quarto`.
+R (>= 4.4), [Quarto](https://quarto.org), a LaTeX engine providing `xelatex`, and the R packages `knitr`, `dplyr`, `recipes`, `rsample`, `yardstick`, `glmnet`, `ggplot2`, `caret`, `randomForest`, `tibble` and `quarto`.

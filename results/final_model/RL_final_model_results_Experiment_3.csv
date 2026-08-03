@@ -1,0 +1,2 @@
+"Accuracy","AUC","Macro_F1","Model","Evaluation"
+0.607938718662953,0.649451165819113,0.562452678344799,"Ridge Logistic (RL)","In-sample (train + test)"

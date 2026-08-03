@@ -1,5 +1,4 @@
 
-
 # VS Code files for those working on multiple tools
 .vscode/*
 !.vscode/settings.json
@@ -11,17 +10,12 @@
 # Local History for Visual Studio Code
 .history/
 
-old_unused/
-
 # Built Visual Studio Code Extensions
 *.vsix
 
 # Data files
-#*.csv
-#*.html
-#*.pdf
-#*.RData
-#*.rdb
-#*.rdx
 *.DS_Store
 *.numbers
+sopranovoices.csv
+dataset_def2.csv
+make_sopranovoices.R
