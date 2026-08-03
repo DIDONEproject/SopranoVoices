@@ -249,17 +249,35 @@ boot_acc <- function(true_labels, pred_labels, n_boot = 1000, seed = 123) {
 # Read dataset
 
 ```{r, read-data}
-# Load the single-source dataset (built by make_sopranovoices.R). The literal
-# NA values in Sex (arias with no singer record) become real NAs, and
+# Load the single-source dataset, downloaded from Zenodo on first use. The
+# literal NA values in Sex (arias with no singer record) become real NAs, and
 # stringsAsFactors turns Gender/Sex and the four character-valued interval
 # features into factors with alphabetical levels, so the second level is the
 # masculine/male class in every experiment
 data_file <- "sopranovoices.csv"
+data_doi <- "10.5281/zenodo.21757127"
+data_url <- paste0("https://zenodo.org/records/21757127/files/",
+                   "sopranovoices.csv?download=1")
+data_md5 <- "2b495d57628d67f962e8fe44fdfcb02d"
 if (!file.exists(data_file)) {
 
-  stop("Data file ", data_file, " not found; run from the repository root")
+  message("Downloading ", data_file, " from Zenodo (DOI ", data_doi, ")")
+  old_opts <- options(timeout = max(600, getOption("timeout")))
+  tmp_file <- paste0(data_file, ".part")
+  download.file(url = data_url, destfile = tmp_file, mode = "wb")
+  options(old_opts)
+  if (!identical(unname(tools::md5sum(tmp_file)), data_md5)) {
+
+    unlink(tmp_file)
+    stop("Checksum mismatch for the file downloaded from ", data_url)
+
+  }
+  file.rename(tmp_file, data_file)
 
 }
+
+# Guarantee that every run uses the exact deposited file
+stopifnot(identical(unname(tools::md5sum(data_file)), data_md5))
 df_all <- read.csv(data_file, stringsAsFactors = TRUE)
 stopifnot(nrow(df_all) == 1682, ncol(df_all) == 576)
 
@@ -422,7 +440,10 @@ test <- test |>
 dim(train)
 dim(test)
 
-# Full dataset for the final-model recipe
+# Full dataset for the final-model recipe -- not interchangeable with
+# bind_rows(train, test) because row order may affect the lambda_hat selection
+# in the final ridge fit.
+combined <- df |>
   select(all_of(selected_features), y)
 ```
 
