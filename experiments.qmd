@@ -25,9 +25,9 @@ editor_options:
 for (exp in 1:3) {
   message("Rendering for experiment: ", exp)
   quarto::quarto_render(
-    input = "Models.qmd",
+    input = "experiments.qmd",
     execute_params = list(experiment = exp),
-    output_file = paste0("Experiment_", exp, ".pdf")
+    output_file = paste0("experiment_", exp, ".pdf")
   )
 }
 
@@ -72,7 +72,7 @@ sessionInfo()
 #| cache: false
 knitr::opts_chunk$set(
   echo = TRUE, cache = FALSE, warning = FALSE, message = FALSE,
-  fig.path = paste0("Models_files/Experiment_", params$experiment, "/")
+  fig.path = paste0("experiments_files/experiment_", params$experiment, "/")
 )
 
 # Compute the AUC of a binary classifier.
@@ -694,7 +694,8 @@ for (name in names(datasets_to_save)) {
   )
 
   # Construct filename
-  file_name <- paste0("results/y_hats/", name, "_", experiment, ".csv")
+  file_name <- paste0("results/y_hats/", tolower(name), "_", experiment,
+                      ".csv")
 
   # Write CSV
   write.csv(data_to_write, file_name, row.names = FALSE)
@@ -810,7 +811,7 @@ metrics_table_combined |>
 # Save table of all metrics + bootstrap tests
 dir.create("results/experiments", showWarnings = FALSE, recursive = TRUE)
 write.csv(metrics_table_combined, paste0("results/experiments/all_results_",
-                                         "Experiment_", experiment, ".csv"),
+                                         "experiment_", experiment, ".csv"),
           row.names = FALSE)
 ```
 
@@ -870,7 +871,7 @@ ci_df_all <- ci_df_all |>
     pct_up = (exp(ci_up) - 1) * 100
   )
 dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
-write.csv(ci_df_all, paste0("results/final_model/ci_df_Experiment_",
+write.csv(ci_df_all, paste0("results/final_model/ci_df_experiment_",
                             experiment, ".csv"),
           row.names = FALSE)
 
@@ -936,7 +937,7 @@ glmnet_summary |>
 
 # Save results
 dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
-write.csv(glmnet_summary, paste0("results/final_model/RL_final_model_results",
-                                 "_Experiment_", experiment, ".csv"),
+write.csv(glmnet_summary, paste0("results/final_model/rl_final_model_results",
+                                 "_experiment_", experiment, ".csv"),
           row.names = FALSE)
 ```

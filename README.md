@@ -10,9 +10,9 @@ The data source is `sopranovoices.csv`: 1,682 soprano arias with nine metadata c
 
 > Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). *Soprano voices in opera seria: dataset of musical features and metadata for 1,682 arias* (Version 2.0) [Data set]. Zenodo. <https://doi.org/10.5281/zenodo.21757127>
 
-`Models.qmd` downloads the data from Zenodo the first time it is rendered, verifies its MD5 checksum, and reuses the local copy on every later run, so no manual download is needed.
+`experiments.qmd` downloads the data from Zenodo the first time it is rendered, verifies its MD5 checksum, and reuses the local copy on every later run, so no manual download is needed.
 
-The three experiment subsets are derived inside `Models.qmd`: (1) all arias, target = character gender; (2) arias whose character gender aligns with the premiering singer's sex, target = character gender; (3) arias with a known singer, target = singer's sex.
+The three experiment subsets are derived inside `experiments.qmd`: (1) all arias, target = character gender; (2) arias whose character gender aligns with the premiering singer's sex, target = character gender; (3) arias with a known singer, target = singer's sex.
 
 ## Reproducing the experiments
 
@@ -22,11 +22,11 @@ From the repository root:
 ./experiments.sh
 ```
 
-This renders `Models.qmd` once per experiment (1-3) and writes:
+This renders `experiments.qmd` once per experiment (1-3) and writes:
 
 | Output | Contents |
 | --- | --- |
-| `Experiment_<n>.pdf` | Full report per experiment |
+| `experiment_<n>.pdf` | Full report per experiment |
 | `preprocessed_datasets/` | Baked train / test / combined designs |
 | `results/dataset_summary/` | Corpus-description tables of the paper (written in the experiment-1 pass) |
 | `results/experiments/` | Test-set metrics and model comparisons |
