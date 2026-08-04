@@ -1,7 +1,7 @@
 ---
-title: "Gender dynamics experiments"
+title: "Gender dynamics case studies"
 params:
-  experiment: 1
+  case_study: 1
 author: "Eduardo García-Portugués, Carlos Vaquero"
 date: '`r Sys.Date()`'
 format:
@@ -18,16 +18,16 @@ editor_options:
 ```{=html}
 <!--
 
-# This report is rendered once per experiment.
-# To reproduce all experiments, run ./experiments.sh from the repository root.
-# Alternatively, execute the following block in R:
+# This report is rendered once per case study.
+# To reproduce all case studies, run ./case_studies.sh from the repository
+# root. Alternatively, execute the following block in R:
 
-for (exp in 1:3) {
-  message("Rendering for experiment: ", exp)
+for (cs in 1:3) {
+  message("Rendering for case study: ", cs)
   quarto::quarto_render(
-    input = "experiments.qmd",
-    execute_params = list(experiment = exp),
-    output_file = paste0("experiment_", exp, ".pdf")
+    input = "case_studies.qmd",
+    execute_params = list(case_study = cs),
+    output_file = paste0("case_study_", cs, ".pdf")
   )
 }
 
@@ -37,8 +37,8 @@ for (exp in 1:3) {
 ```{r, setup-params}
 #| echo: false
 # Report parameters
-experiment <- params$experiment
-message("Running experiment ", experiment)
+case_study <- params$case_study
+message("Running case study ", case_study)
 
 # Analysis constants, referenced throughout the report
 n_folds <- 10 # Folds for every cross-validation (glmnet and caret)
@@ -72,7 +72,7 @@ sessionInfo()
 #| cache: false
 knitr::opts_chunk$set(
   echo = TRUE, cache = FALSE, warning = FALSE, message = FALSE,
-  fig.path = paste0("experiments_files/experiment_", params$experiment, "/")
+  fig.path = paste0("case_studies_files/case_study_", params$case_study, "/")
 )
 
 # Compute the AUC of a binary classifier.
@@ -254,7 +254,7 @@ boot_acc <- function(true_labels, pred_labels, n_boot = 1000, seed = 123) {
 # literal NA values in Sex (arias with no singer record) become real NAs, and
 # stringsAsFactors turns Gender/Sex and the four character-valued interval
 # features into factors with alphabetical levels, so the second level is the
-# masculine/male class in every experiment
+# masculine/male class in every case study
 data_file <- "sopranovoices.csv"
 data_doi <- "10.5281/zenodo.21757127"
 data_url <- paste0("https://zenodo.org/records/21757127/files/",
@@ -286,12 +286,12 @@ stopifnot(nrow(df_all) == 1682, ncol(df_all) == 576)
 meta_cols <- c("AriaId", "ariaTitle", "AriaOpera", "Character", "Gender",
                "Composer", "Year", "Singer", "Sex")
 
-# Experiment subsets and target y:
+# Case study subsets and target y:
 # 1 = all arias, y = character gender;
 # 2 = arias whose character gender aligns with the singer's sex, y = gender;
 # 3 = arias with a known singer, y = singer's sex
 df <- switch(
-  as.character(experiment),
+  as.character(case_study),
   "1" = df_all |>
     mutate(y = Gender),
   "2" = df_all |>
@@ -301,7 +301,7 @@ df <- switch(
   "3" = df_all |>
     filter(!is.na(Sex)) |>
     mutate(y = Sex),
-  stop("Experiment ", experiment, " not supported (expected 1, 2 or 3)")
+  stop("Case study ", case_study, " not supported (expected 1, 2 or 3)")
 )
 
 # Drop metadata and any factor levels emptied by the filters
@@ -329,9 +329,9 @@ test <- testing(split_obj)
 #| fig.height: 2.9
 # Two-panel boxplots of the arias' vocal ranges: highest and lowest notes by
 # premiering singer's sex (arias with a known singer) and by character gender
-# (all arias). Independent of the current experiment, so it is rendered only
-# in the experiment == 1 pass.
-if (experiment == 1) {
+# (all arias). Independent of the current case study, so it is rendered only
+# in the case_study == 1 pass.
+if (case_study == 1) {
 
   make_ranges <- function(data, group, panel) {
     bind_rows(
@@ -387,9 +387,9 @@ if (experiment == 1) {
 ```{r, dataset-summary}
 # Sources for the corpus-description tables of the paper: character gender vs.
 # premiering singer's sex (Table 1) and the per-character breakdown (Table 2).
-# Independent of the current experiment, so written only in the
-# experiment == 1 pass.
-if (experiment == 1) {
+# Independent of the current case study, so written only in the
+# case_study == 1 pass.
+if (case_study == 1) {
 
   dir.create("results/dataset_summary", showWarnings = FALSE, recursive = TRUE)
 
@@ -498,13 +498,13 @@ all_bake <- bake(prep_all, new_data = NULL)
 
 # Export datasets for future reference and use
 dir.create("preprocessed_datasets", showWarnings = FALSE, recursive = TRUE)
-write.csv(train_bake, paste0("preprocessed_datasets/train_bake_exp",
-                             experiment, ".csv"),
+write.csv(train_bake, paste0("preprocessed_datasets/train_bake_cs",
+                             case_study, ".csv"),
           row.names = FALSE)
-write.csv(test_train_bake, paste0("preprocessed_datasets/test_train_bake_exp",
-                                  experiment, ".csv"),
+write.csv(test_train_bake, paste0("preprocessed_datasets/test_train_bake_cs",
+                                  case_study, ".csv"),
           row.names = FALSE)
-write.csv(all_bake, paste0("preprocessed_datasets/all_bake_exp", experiment,
+write.csv(all_bake, paste0("preprocessed_datasets/all_bake_cs", case_study,
                            ".csv"),
           row.names = FALSE)
 ```
@@ -694,7 +694,7 @@ for (name in names(datasets_to_save)) {
   )
 
   # Construct filename
-  file_name <- paste0("results/y_hats/", tolower(name), "_", experiment,
+  file_name <- paste0("results/y_hats/", tolower(name), "_", case_study,
                       ".csv")
 
   # Write CSV
@@ -809,9 +809,9 @@ metrics_table_combined |>
   kable(digits = 4)
 
 # Save table of all metrics + bootstrap tests
-dir.create("results/experiments", showWarnings = FALSE, recursive = TRUE)
-write.csv(metrics_table_combined, paste0("results/experiments/all_results_",
-                                         "experiment_", experiment, ".csv"),
+dir.create("results/case_studies", showWarnings = FALSE, recursive = TRUE)
+write.csv(metrics_table_combined, paste0("results/case_studies/all_results_",
+                                         "case_study_", case_study, ".csv"),
           row.names = FALSE)
 ```
 
@@ -871,8 +871,8 @@ ci_df_all <- ci_df_all |>
     pct_up = (exp(ci_up) - 1) * 100
   )
 dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
-write.csv(ci_df_all, paste0("results/final_model/ci_df_experiment_",
-                            experiment, ".csv"),
+write.csv(ci_df_all, paste0("results/final_model/ci_df_case_study_",
+                            case_study, ".csv"),
           row.names = FALSE)
 
 # Significant slopes with and without the Bonferroni correction, for reference
@@ -916,7 +916,7 @@ plot_RL
 
 # Save plot
 dir.create("plots", showWarnings = FALSE, recursive = TRUE)
-plot_name <- paste0("plots/plot_rl_", experiment, ".png")
+plot_name <- paste0("plots/plot_rl_", case_study, ".png")
 ggsave(filename = plot_name, plot = plot_RL, width = 7.5, height = 6,
        dpi = 300)
 
@@ -938,6 +938,6 @@ glmnet_summary |>
 # Save results
 dir.create("results/final_model", showWarnings = FALSE, recursive = TRUE)
 write.csv(glmnet_summary, paste0("results/final_model/rl_final_model_results",
-                                 "_experiment_", experiment, ".csv"),
+                                 "_case_study_", case_study, ".csv"),
           row.names = FALSE)
 ```
