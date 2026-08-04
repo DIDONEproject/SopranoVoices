@@ -43,6 +43,7 @@ message("Running experiment ", experiment)
 # Analysis constants, referenced throughout the report
 n_folds <- 10 # Folds for every cross-validation (glmnet and caret)
 n_tune <- 5 # Grid size for the random forest mtry tuning
+n_tree <- 5000 # Trees in the random forest
 B <- 100000 # Bootstrap replicates for model comparison
 level <- 0.95 # Confidence level for all intervals
 ci_probs <- c((1 - level) / 2, 1 - (1 - level) / 2)
@@ -634,7 +635,8 @@ cv_ctrl <- trainControl(method = "cv", number = n_folds, classProbs = TRUE,
 
 # Train Random Forest with tuning of mtry optimizing AUC
 rf_train <- train(x = train_bake_no_y, y = train_bake$y, method = "rf",
-                  metric = "ROC", trControl = cv_ctrl, tuneLength = n_tune)
+                  metric = "ROC", trControl = cv_ctrl, tuneLength = n_tune,
+                  ntree = n_tree)
 plot(rf_train)
 ```
 
