@@ -10,9 +10,7 @@ The data source is `sopranovoices.csv`: 1,682 soprano arias with nine metadata c
 
 > Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). *Soprano voices in opera seria: dataset of musical features and metadata for 1,682 arias* (Version 2.0) [Data set]. Zenodo. <https://doi.org/10.5281/zenodo.21757127>
 
-The csv file is not tracked by this repository. `Models.qmd` downloads it from Zenodo the first time it is rendered, verifies its MD5 checksum, and reuses the local copy on every later run, so no manual download is needed. Placing a copy of `sopranovoices.csv` in the repository root beforehand also works.
-
-The deposited file was built from the raw `musif` extraction `dataset_def2.csv` by `make_sopranovoices.R`, which purges the placeholder and non-soprano columns, repairs two data-entry artifacts, and re-encodes to UTF-8. Neither the raw extraction nor that build script is distributed here: the Zenodo deposit is the reproducible starting point of the analysis.
+`Models.qmd` downloads the data from Zenodo the first time it is rendered, verifies its MD5 checksum, and reuses the local copy on every later run, so no manual download is needed.
 
 The three experiment subsets are derived inside `Models.qmd`: (1) all arias, target = character gender; (2) arias whose character gender aligns with the premiering singer's sex, target = character gender; (3) arias with a known singer, target = singer's sex.
 
