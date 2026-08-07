@@ -2,7 +2,7 @@
 
 Repository reproducing the experiments from the paper:
 
-> Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). Soprano voices in opera seria: A corpus-based inquiry into eighteenth-century vocal types. *Submitted*.
+> Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). Soprano voices in opera seria: A corpus-based inquiry into eighteenth-century vocal types. *arXiv:2608.05257*. [doi:10.48550/arXiv.2608.05257](https://doi.org/10.48550/arXiv.2608.05257).
 
 ## Data
 
