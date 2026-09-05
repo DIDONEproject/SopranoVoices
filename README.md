@@ -2,13 +2,13 @@
 
 Repository reproducing the case studies from the paper:
 
-> Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). Soprano voices in opera seria: A corpus-based inquiry into eighteenth-century vocal types. *arXiv:2608.05257*. [doi:10.48550/arXiv.2608.05257](https://doi.org/10.48550/arXiv.2608.05257).
+> Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, Á. (2026). Soprano voices in opera seria: A corpus-based inquiry into eighteenth-century vocal types. *arXiv:2608.05257*. [doi:10.48550/arXiv.2608.05257](https://doi.org/10.48550/arXiv.2608.05257).
 
 ## Data
 
-The data source is `sopranovoices.csv`: 1,682 soprano arias with nine metadata columns (`AriaId`, `ariaTitle`, `AriaOpera`, `Character`, `Gender`, `Composer`, `Year`, `Singer`, `Sex`) and the 567 principal-soprano `musif` features (`PartSop_*`). The dataset is deposited on Zenodo under [10.5281/zenodo.21757127](https://doi.org/10.5281/zenodo.21757127) (CC BY 4.0) and is cited as:
+The data source is `sopranovoices.csv`: 1,879 soprano arias with 29 metadata columns (`AriaId`, `AriaName`, `AriaOpera`, `Character`, `Gender`, `Composer`, `Year`, `Singer`, `Sex`, and further contextual descriptors) and the 377 principal-soprano `musif` features (`PartSop_*`). One aria attributed jointly to two characters of different gender is excluded inside `case_studies.qmd`, leaving 1,878 analyzed arias. The dataset is deposited on Zenodo under [10.5281/zenodo.21757127](https://doi.org/10.5281/zenodo.21757127) (CC BY 4.0) and is cited as:
 
-> Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, A. (2026). *Soprano voices in opera seria: dataset of musical features and metadata for 1,682 arias* (Version 2.0) [Data set]. Zenodo. <https://doi.org/10.5281/zenodo.21757127>
+> Llorens, A., García-Portugués, E., Vaquero, C., and Torrente, Á. (2026). *Soprano voices in opera seria: dataset of musical features and metadata for 1,879 arias* [Data set]. Zenodo. <https://doi.org/10.5281/zenodo.21757127>
 
 `case_studies.qmd` downloads the data from Zenodo the first time it is rendered, verifies its MD5 checksum, and reuses the local copy on every later run, so no manual download is needed.
 
